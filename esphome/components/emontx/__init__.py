@@ -2,7 +2,7 @@ from esphome import automation
 import esphome.codegen as cg
 from esphome.components import uart
 import esphome.config_validation as cv
-from esphome.const import CONF_COMMAND, CONF_ID, CONF_ON_DATA, CONF_TRIGGER_ID
+from esphome.const import CONF_COMMAND, CONF_ID, CONF_TRIGGER_ID
 
 AUTO_LOAD = ["json"]
 CODEOWNERS = ["@FredM67", "@TrystanLea", "@glynhudson"]
@@ -28,6 +28,7 @@ CONF_EMONTX_ID = "emontx_id"
 CONF_TAG_NAME = "tag_name"
 CONF_ON_JSON = "on_json"
 CONF_CONFIG_PANEL = "config_panel"
+CONF_ON_DATA = "on_data"
 
 # Main configuration schema
 CONFIG_SCHEMA = (
