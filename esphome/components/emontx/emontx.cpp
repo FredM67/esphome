@@ -268,23 +268,9 @@ void EmonTx::dump_config() {
  * @param command The command string to send (LF will be appended automatically).
  */
 void EmonTx::send_command(std::string command) {
-  // Log raw input for debugging
-  ESP_LOGD(TAG, "pre-send_command raw input (len=%d):", command.length());
-  for (size_t i = 0; i < command.length(); i++) {
-    ESP_LOGD(TAG, "  [%d] = 0x%02X '%c'", i, (uint8_t) command[i], command[i] >= 32 ? command[i] : '?');
-  }
-  // Strip any trailing CR/LF that may have been added by the service call chain
-  while (!command.empty() && (command.back() == '\r' || command.back() == '\n')) {
-    command.pop_back();
-  }
   // Append LF as required by emonTx firmware
   command += "\n";
-  ESP_LOGD(TAG, "Sending command to emonTx: %s (len=%d)", command.c_str(), command.length());
-
-  ESP_LOGD(TAG, "send_command raw input (len=%d):", command.length());
-  for (size_t i = 0; i < command.length(); i++) {
-    ESP_LOGD(TAG, "  [%d] = 0x%02X '%c'", i, (uint8_t) command[i], command[i] >= 32 ? command[i] : '?');
-  }
+  ESP_LOGD(TAG, "Sending command to emonTx: %s", command.c_str());
 
   this->write_str(command.c_str());
 }
