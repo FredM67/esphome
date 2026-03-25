@@ -84,18 +84,17 @@ CONFIG_SCHEMA = (
 )
 
 
-def final_validate(config: ConfigType):
-    # Count sensors for this emontx instance and store for to_code
+def final_validate(config: ConfigType) -> ConfigType:
     full_config = fv.full_config.get()
-    sensor_count = 0
-    hub_id = config[CONF_ID]
-    for sensor_conf in full_config.get("sensor", []):
-        if (
-            sensor_conf.get(CONF_PLATFORM) == "emontx"
-            and sensor_conf.get(CONF_EMONTX_ID) == hub_id
-        ):
-            sensor_count += 1
-    _get_data().sensor_counts[str(hub_id)] = sensor_count
+
+    # Count sensors registered to this hub (IDs are resolved at final_validate stage)
+    hub_id = str(config[CONF_ID])
+    sensor_count = sum(
+        1
+        for s in full_config.get("sensor", [])
+        if s.get(CONF_PLATFORM) == "emontx" and str(s.get(CONF_EMONTX_ID)) == hub_id
+    )
+    _get_data().sensor_counts[hub_id] = sensor_count
 
     # TX is required if config_panel is enabled (send_command action requires config_panel)
     require_tx = config.get(CONF_CONFIG_PANEL, False)
@@ -130,12 +129,12 @@ def final_validate(config: ConfigType):
 FINAL_VALIDATE_SCHEMA = final_validate
 
 
-async def to_code(config):
+async def to_code(config: ConfigType) -> None:
     var = cg.new_Pvariable(config[CONF_ID])
     await cg.register_component(var, config)
     await uart.register_uart_device(var, config)
 
-    # Initialize sensor storage with exact count from final_validate
+    # Initialize sensor storage with count from final_validate
     sensor_count = _get_data().sensor_counts.get(str(config[CONF_ID]), 0)
     if sensor_count > 0:
         cg.add(var.init_sensors(sensor_count))
@@ -144,36 +143,18 @@ async def to_code(config):
     cg.add(var.set_config_panel(config[CONF_CONFIG_PANEL]))
 
     # Enable HomeAssistant services feature when config_panel is enabled
-    # USE_API_HOMEASSISTANT_SERVICES enables the event firing code in C++
-    # Note: USE_API_CUSTOM_SERVICES (for send_command service) requires the user
-    # to set 'custom_services: true' in the 'api:' section of their YAML
     if config[CONF_CONFIG_PANEL]:
         cg.add_define("USE_API_HOMEASSISTANT_SERVICES")
 
-    # Process on_json triggers
-    if CONF_ON_JSON in config:
-        for conf in config[CONF_ON_JSON]:
-            trigger = cg.new_Pvariable(conf[CONF_TRIGGER_ID], var)
-            await automation.build_automation(
-                trigger,
-                [
-                    (cg.JsonObject, "json"),
-                    (cg.std_string, "raw_json"),
-                ],
-                conf,
-            )
-
-    # Process on_data triggers
-    if CONF_ON_DATA in config:
-        for conf in config[CONF_ON_DATA]:
-            trigger = cg.new_Pvariable(conf[CONF_TRIGGER_ID], var)
-            await automation.build_automation(
-                trigger,
-                [
-                    (cg.std_string, "data"),
-                ],
-                conf,
-            )
+    # Process trigger automations
+    for conf_key, args in (
+        (CONF_ON_JSON, [(cg.JsonObject, "json"), (cg.std_string, "raw_json")]),
+        (CONF_ON_DATA, [(cg.std_string, "data")]),
+    ):
+        if conf_key in config:
+            for conf in config[conf_key]:
+                trigger = cg.new_Pvariable(conf[CONF_TRIGGER_ID], var)
+                await automation.build_automation(trigger, args, conf)
 
 
 # Action: emontx.send_command
@@ -192,7 +173,9 @@ EMONTX_SEND_COMMAND_ACTION_SCHEMA = cv.Schema(
     EMONTX_SEND_COMMAND_ACTION_SCHEMA,
     synchronous=True,
 )
-async def emontx_send_command_action_to_code(config, action_id, template_arg, args):
+async def emontx_send_command_action_to_code(
+    config: ConfigType, action_id, template_arg, args
+) -> None:
     var = cg.new_Pvariable(action_id, template_arg)
     await cg.register_parented(var, config[CONF_ID])
     template_ = await cg.templatable(config[CONF_COMMAND], args, cg.std_string)

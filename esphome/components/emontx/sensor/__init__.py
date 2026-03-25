@@ -23,6 +23,7 @@ from esphome.const import (
     UNIT_WATT,
     UNIT_WATT_HOURS,
 )
+from esphome.types import ConfigType
 
 from .. import CONF_EMONTX_ID, CONF_TAG_NAME, EmonTx, emontx_ns
 
@@ -90,8 +91,8 @@ BASE_SCHEMA = sensor.sensor_schema(
 )
 
 
-def apply_tag_defaults(config):
-    """Apply defaults based on tag prefix if applicable, but don't restrict any tags"""
+def apply_tag_defaults(config: ConfigType) -> ConfigType:
+    """Apply defaults based on tag prefix if applicable, but don't restrict any tags."""
     tag = config[CONF_TAG_NAME]
 
     # Skip if tag is too short
@@ -124,9 +125,9 @@ def apply_tag_defaults(config):
 CONFIG_SCHEMA = cv.All(BASE_SCHEMA, apply_tag_defaults)
 
 
-async def to_code(config):
+async def to_code(config: ConfigType) -> None:
     var = cg.new_Pvariable(config[CONF_ID])
     await cg.register_component(var, config)
     await sensor.register_sensor(var, config)
-    emontx = await cg.get_variable(config[CONF_EMONTX_ID])
-    cg.add(emontx.register_sensor(config[CONF_TAG_NAME], var))
+    hub = await cg.get_variable(config[CONF_EMONTX_ID])
+    cg.add(hub.register_sensor(config[CONF_TAG_NAME], var))
