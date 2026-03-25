@@ -1,3 +1,5 @@
+from dataclasses import dataclass, field
+
 from esphome import automation
 import esphome.codegen as cg
 from esphome.components import uart
@@ -6,18 +8,21 @@ from esphome.const import (
     CONF_COMMAND,
     CONF_ID,
     CONF_ON_DATA,
+    CONF_PLATFORM,
     CONF_RX_BUFFER_SIZE,
     CONF_TRIGGER_ID,
     CONF_UART_ID,
 )
+from esphome.core import CORE
 import esphome.final_validate as fv
+from esphome.types import ConfigType
 
 AUTO_LOAD = ["json"]
 CODEOWNERS = ["@FredM67", "@TrystanLea", "@glynhudson"]
 DEPENDENCIES = ["uart"]
 
 emontx_ns = cg.esphome_ns.namespace("emontx")
-EmonTx = emontx_ns.class_("EmonTx", cg.PollingComponent, uart.UARTDevice)
+EmonTx = emontx_ns.class_("EmonTx", cg.Component, uart.UARTDevice)
 
 # Add trigger class for on_json
 EmonTxJsonTrigger = emontx_ns.class_(
@@ -36,6 +41,22 @@ CONF_EMONTX_ID = "emontx_id"
 CONF_TAG_NAME = "tag_name"
 CONF_ON_JSON = "on_json"
 CONF_CONFIG_PANEL = "config_panel"
+
+DOMAIN = "emontx"
+
+MINIMUM_RX_BUFFER_SIZE = 2048
+
+
+@dataclass
+class EmonTxData:
+    sensor_counts: dict[str, int] = field(default_factory=dict)
+
+
+def _get_data() -> EmonTxData:
+    if DOMAIN not in CORE.data:
+        CORE.data[DOMAIN] = EmonTxData()
+    return CORE.data[DOMAIN]
+
 
 # Main configuration schema
 CONFIG_SCHEMA = (
@@ -58,51 +79,39 @@ CONFIG_SCHEMA = (
             ),
         }
     )
-    .extend(cv.polling_component_schema("10s"))
+    .extend(cv.COMPONENT_SCHEMA)
     .extend(uart.UART_DEVICE_SCHEMA)
 )
 
 
-def final_validate(config):
+def final_validate(config: ConfigType):
+    # Count sensors for this emontx instance and store for to_code
+    full_config = fv.full_config.get()
+    sensor_count = 0
+    hub_id = config[CONF_ID]
+    for sensor_conf in full_config.get("sensor", []):
+        if (
+            sensor_conf.get(CONF_PLATFORM) == "emontx"
+            and sensor_conf.get(CONF_EMONTX_ID) == hub_id
+        ):
+            sensor_count += 1
+    _get_data().sensor_counts[str(hub_id)] = sensor_count
+
     # TX is required if config_panel is enabled (send_command action requires config_panel)
     require_tx = config.get(CONF_CONFIG_PANEL, False)
 
     # Ensure UART RX buffer size is large enough to handle data bursts from firmware
-    # The firmware can send ~2KB of configuration data in bursts which would
-    # overflow the default 256-byte buffer causing data loss and corruption
-    MINIMUM_RX_BUFFER_SIZE = 2048
-
-    full_config = fv.full_config.get()
-
-    # Find the UART component config and ensure rx_buffer_size is adequate
     for uart_conf in full_config["uart"]:
         if uart_conf[CONF_ID] == config[CONF_UART_ID]:
             current_buffer_size = uart_conf.get(CONF_RX_BUFFER_SIZE, 256)
             if current_buffer_size < MINIMUM_RX_BUFFER_SIZE:
-                uart_id_str = str(config[CONF_UART_ID])
-
-                # If value is exactly 256 (UART default), assume it's the default and auto-upgrade
-                # If it's any other value below 2048, assume user explicitly set it and raise error
-                if current_buffer_size == 256:
-                    # Using default value - auto-upgrade with info message
-                    uart_conf[CONF_RX_BUFFER_SIZE] = MINIMUM_RX_BUFFER_SIZE
-                    import logging
-
-                    _LOGGER = logging.getLogger(__name__)
-                    _LOGGER.info(
-                        "emontx: Automatically setting UART rx_buffer_size to %d bytes (minimum required by emonTx firmware)",
-                        MINIMUM_RX_BUFFER_SIZE,
-                    )
-                else:
-                    # User explicitly configured a non-default value that's too small
-                    raise cv.Invalid(
-                        f"Component emontx requires UART '{uart_id_str}' to have "
-                        f"rx_buffer_size of at least {MINIMUM_RX_BUFFER_SIZE} bytes "
-                        f"(currently set to {current_buffer_size} bytes). "
-                        f"The emonTx firmware sends ~2KB configuration bursts that would overflow smaller buffers. "
-                        f"Please increase rx_buffer_size in your uart configuration.",
-                        path=[CONF_UART_ID],
-                    )
+                raise cv.Invalid(
+                    f"Component emontx requires UART '{config[CONF_UART_ID]}' to have "
+                    f"rx_buffer_size of at least {MINIMUM_RX_BUFFER_SIZE} bytes "
+                    f"(currently set to {current_buffer_size} bytes). "
+                    f"Please add 'rx_buffer_size: {MINIMUM_RX_BUFFER_SIZE}' to your uart configuration.",
+                    path=[CONF_UART_ID],
+                )
             break
 
     # Validate UART settings
@@ -125,6 +134,11 @@ async def to_code(config):
     var = cg.new_Pvariable(config[CONF_ID])
     await cg.register_component(var, config)
     await uart.register_uart_device(var, config)
+
+    # Initialize sensor storage with exact count from final_validate
+    sensor_count = _get_data().sensor_counts.get(str(config[CONF_ID]), 0)
+    if sensor_count > 0:
+        cg.add(var.init_sensors(sensor_count))
 
     # Set config_panel option
     cg.add(var.set_config_panel(config[CONF_CONFIG_PANEL]))

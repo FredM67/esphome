@@ -4,14 +4,20 @@
 #include "esphome/core/defines.h"
 #include "esphome/core/automation.h"
 #include "esphome/core/helpers.h"
+#include "esphome/core/string_ref.h"
 #include "esphome/components/uart/uart.h"
 #include "esphome/components/json/json_util.h"
+
+#include <array>
 
 #ifdef USE_SENSOR
 #include "esphome/components/sensor/sensor.h"
 #endif
 
 namespace esphome::emontx {
+
+/// Maximum line length in bytes (plus one byte reserved for null terminator)
+static constexpr size_t MAX_LINE_LENGTH = 1024;
 
 /**
  * @class EmonTx
@@ -20,20 +26,19 @@ namespace esphome::emontx {
  * The EmonTx processes incoming data frames via UART,
  * extracts tags and values, and publishes them to registered sensors.
  */
-class EmonTx : public PollingComponent, public uart::UARTDevice {
+class EmonTx : public Component, public uart::UARTDevice {
  public:
   EmonTx() = default;
 
   void loop() override;
   void setup() override;
-  void update() override;
   void dump_config() override;
 
-  void add_on_json_callback(std::function<void(JsonObject, const std::string &)> &&callback) {
+  void add_on_json_callback(std::function<void(JsonObject, StringRef)> &&callback) {
     this->json_callbacks_.add(std::move(callback));
   }
 
-  void add_on_data_callback(std::function<void(const std::string &)> &&callback) {
+  void add_on_data_callback(std::function<void(StringRef)> &&callback) {
     this->data_callbacks_.add(std::move(callback));
   }
 
@@ -44,27 +49,21 @@ class EmonTx : public PollingComponent, public uart::UARTDevice {
   void set_config_panel(bool enabled) { this->config_panel_ = enabled; }
 
 #ifdef USE_SENSOR
+  void init_sensors(size_t count) { this->sensors_.init(count); }
   void register_sensor(const char *tag_name, sensor::Sensor *sensor);
 #endif
 
  protected:
+  void parse_json_(const char *data, size_t len);
+
 #ifdef USE_SENSOR
-  std::vector<std::pair<const char *, sensor::Sensor *>> sensors_{};
+  FixedVector<std::pair<const char *, sensor::Sensor *>> sensors_{};
 #endif
-  std::string buffer_;
-
-  enum class ParseState {
-    OFF,
-    WAITING_FOR_START,
-  };
-  ParseState state_{ParseState::OFF};
-
-  void parse_json_(const std::string &data);
-
-  LazyCallbackManager<void(JsonObject, const std::string &)> json_callbacks_;
-  LazyCallbackManager<void(const std::string &)> data_callbacks_;
-
+  LazyCallbackManager<void(JsonObject, StringRef)> json_callbacks_;
+  LazyCallbackManager<void(StringRef)> data_callbacks_;
   bool config_panel_{false};
+  size_t buffer_pos_{0};
+  std::array<char, MAX_LINE_LENGTH + 1> buffer_{};
 };
 
 // Action to send command to emonTx
