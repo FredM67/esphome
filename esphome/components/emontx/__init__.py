@@ -99,6 +99,19 @@ def final_validate(config: ConfigType) -> ConfigType:
     # TX is required if config_panel is enabled (send_command action requires config_panel)
     require_tx = config.get(CONF_CONFIG_PANEL, False)
 
+    # Validate that api: custom_services: true is set when config_panel is enabled
+    # (required for auto-registering the send_command HA service via CustomAPIDevice)
+    if require_tx:
+        api_config = full_config.get("api", {})
+        if not api_config.get("custom_services", False):
+            raise cv.Invalid(
+                "Component emontx with 'config_panel: true' requires "
+                "'custom_services: true' in the 'api:' section of your YAML configuration. "
+                "This enables the automatic registration of the send_command service in "
+                "Home Assistant.",
+                path=[CONF_CONFIG_PANEL],
+            )
+
     # Ensure UART RX buffer size is large enough to handle data bursts from firmware
     for uart_conf in full_config["uart"]:
         if uart_conf[CONF_ID] == config[CONF_UART_ID]:
@@ -145,6 +158,9 @@ async def to_code(config: ConfigType) -> None:
     # Enable HomeAssistant services feature when config_panel is enabled
     if config[CONF_CONFIG_PANEL]:
         cg.add_define("USE_API_HOMEASSISTANT_SERVICES")
+        # Enable CustomAPIDevice service registration (auto-registers send_command)
+        cg.add_define("USE_API_USER_DEFINED_ACTIONS")
+        cg.add_define("USE_API_CUSTOM_SERVICES")
 
     # Process trigger automations
     for conf_key, args in (

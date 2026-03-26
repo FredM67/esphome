@@ -8,6 +8,10 @@
 #include "esphome/components/uart/uart.h"
 #include "esphome/components/json/json_util.h"
 
+#ifdef USE_API_CUSTOM_SERVICES
+#include "esphome/components/api/custom_api_device.h"
+#endif
+
 #include <array>
 
 #ifdef USE_SENSOR
@@ -26,7 +30,13 @@ static constexpr size_t MAX_LINE_LENGTH = 1024;
  * The EmonTx processes incoming data frames via UART,
  * extracts tags and values, and publishes them to registered sensors.
  */
-class EmonTx : public Component, public uart::UARTDevice {
+class EmonTx : public Component,
+               public uart::UARTDevice
+#ifdef USE_API_CUSTOM_SERVICES
+    ,
+               public api::CustomAPIDevice
+#endif
+{
  public:
   EmonTx() = default;
 
@@ -64,6 +74,9 @@ class EmonTx : public Component, public uart::UARTDevice {
   bool config_panel_{false};
   size_t buffer_pos_{0};
   std::array<char, MAX_LINE_LENGTH + 1> buffer_{};
+
+  // Service callback wrapper (register_service requires std::string by value)
+  void on_send_command_service_(std::string command) { this->send_command(command); }  // NOLINT
 };
 
 // Action to send command to emonTx

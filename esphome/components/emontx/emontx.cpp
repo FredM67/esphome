@@ -12,7 +12,16 @@ namespace esphome::emontx {
 
 static const char *const TAG = "emontx";
 
-void EmonTx::setup() { this->buffer_pos_ = 0; }
+void EmonTx::setup() {
+  this->buffer_pos_ = 0;
+
+#ifdef USE_API_CUSTOM_SERVICES
+  // Auto-register send_command service when config_panel is enabled
+  if (this->config_panel_) {
+    this->register_service(&EmonTx::on_send_command_service_, "send_command", {"command"});
+  }
+#endif
+}
 
 /**
  * @brief Implements the main loop for parsing data from the serial port.
