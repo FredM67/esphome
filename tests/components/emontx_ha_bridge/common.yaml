@@ -6,13 +6,6 @@ api:
   homeassistant_services: true
   custom_services: true
 
-uart:
-  - id: uart_emontx
-    tx_pin: ${tx_pin}
-    rx_pin: ${rx_pin}
-    baud_rate: 115200
-    rx_buffer_size: 2048
-
 emontx:
   id: test_emontx
 
