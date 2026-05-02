@@ -10,4 +10,3 @@ emontx:
   id: test_emontx
 
 emontx_ha_bridge:
-  emontx_id: test_emontx
