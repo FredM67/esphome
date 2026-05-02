@@ -17,7 +17,7 @@ CONFIG_SCHEMA = (
     cv.Schema(
         {
             cv.GenerateID(): cv.declare_id(EmonTxHaBridge),
-            cv.Required(CONF_EMONTX_ID): cv.use_id(emontx.EmonTx),
+            cv.GenerateID(CONF_EMONTX_ID): cv.use_id(emontx.EmonTx),
         }
     ).extend(cv.COMPONENT_SCHEMA)
 )
