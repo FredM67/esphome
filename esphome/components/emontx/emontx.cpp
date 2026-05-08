@@ -16,6 +16,10 @@ void EmonTx::setup() { this->buffer_pos_ = 0; }
  * 2. If line starts with '{', parse as JSON and update sensors/callbacks
  */
 void EmonTx::loop() {
+  // Yield UART to emontx_updater during firmware flashing.
+  if (this->paused_)
+    return;
+
   // Read all available data to prevent UART buffer overflow
   while (this->available() > 0) {
     uint8_t received = this->read();
