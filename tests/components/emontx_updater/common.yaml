@@ -1,0 +1,15 @@
+wifi:
+  ssid: MySSID
+  password: password1
+
+api:
+  custom_services: true
+
+http_request:
+
+emontx:
+  id: test_emontx
+
+emontx_updater:
+  emontx_id: test_emontx
+  bootloader_timeout: 5s
