@@ -482,18 +482,15 @@ bool EmonTxUpdater::samba_version_(std::string &ver_out) {
   const uint8_t cmd[] = {'V', '#'};
   this->uart_write_(cmd, sizeof(cmd));
 
-  // Read printable characters until a non-printable byte or timeout (100 ms).
+  // Read bytes until a 50 ms gap (end of response).
+  // Non-printable bytes (\n, \r, prompts) are consumed and discarded so they
+  // do not become stale bytes that corrupt subsequent SAM-BA reads.
   ver_out.clear();
   uint8_t b;
-  uint32_t deadline = millis() + 300;
-  while (millis() < deadline) {
-    if (!this->uart_read_byte_(b, 50))
-      break;
-    if (b < 0x20 || b > 0x7E)
-      break;
-    ver_out += static_cast<char>(b);
-    if (ver_out.size() > 200)
-      break;
+  while (this->uart_read_byte_(b, 50)) {
+    if (b >= 0x20 && b <= 0x7E && ver_out.size() < 200)
+      ver_out += static_cast<char>(b);
+    // Non-printable bytes are intentionally consumed here and not added.
   }
   return !ver_out.empty();
 }
@@ -526,6 +523,10 @@ bool EmonTxUpdater::samba_read_word_(uint32_t addr, uint32_t &value_out) {
 
 bool EmonTxUpdater::samba_write_(uint32_t addr, const uint8_t *data, size_t size) {
   // "S%08X,%08X#" — 19 chars, then XModem-CRC transfer.
+  // Flush any stale bytes BEFORE sending the command so they cannot be
+  // mistaken for the 'C' XModem start that SAM-BA sends in response.
+  // SAM-BA cannot have sent 'C' yet — it hasn't received the command.
+  this->uart_flush_rx_();
   char cmd[20];
   snprintf(cmd, sizeof(cmd), "S%08" PRIX32 ",%08" PRIX32 "#", addr, (uint32_t) size);
   this->uart_write_(reinterpret_cast<const uint8_t *>(cmd), 19);
@@ -552,17 +553,25 @@ uint16_t EmonTxUpdater::crc16_(const uint8_t *data, size_t len) {
 }
 
 bool EmonTxUpdater::xmodem_send_(const uint8_t *data, size_t size) {
-  // Wait for receiver to send 'C' (CRC mode request).
+  // Wait for receiver to send 'C' (XModem-CRC mode request).
+  // Use a total-timeout loop instead of a fixed retry count so that any
+  // stale bytes that slipped through the flush cannot exhaust retries before
+  // SAM-BA's real 'C' arrives.  Any unexpected byte is logged and skipped.
   uint8_t start_byte;
   bool got_start = false;
-  for (int i = 0; i < XMODEM_MAX_RETRIES; i++) {
-    if (this->uart_read_byte_(start_byte, 3000) && start_byte == XMODEM_CRC_START) {
+  uint32_t deadline = millis() + 10000;  // 10 s overall timeout
+  while (!got_start && millis() < deadline) {
+    App.feed_wdt();
+    if (!this->uart_read_byte_(start_byte, 200))
+      continue;  // 200 ms chunk timeout — keep trying within the 10 s window
+    if (start_byte == XMODEM_CRC_START) {
       got_start = true;
-      break;
+    } else {
+      ESP_LOGW(TAG, "XModem: discarding unexpected byte 0x%02X while waiting for 'C'", start_byte);
     }
   }
   if (!got_start) {
-    ESP_LOGE(TAG, "XModem: no CRC start ('C') received from SAM-BA");
+    ESP_LOGE(TAG, "XModem: no CRC start ('C') received from SAM-BA (10 s timeout)");
     return false;
   }
 
