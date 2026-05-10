@@ -5,7 +5,7 @@ from esphome.components import emontx
 from esphome.const import CONF_ID
 from esphome.types import ConfigType
 
-DEPENDENCIES = ["emontx", "http_request", "api"]
+DEPENDENCIES = ["esp32", "emontx", "http_request", "api"]
 CODEOWNERS = ["@FredM67"]
 
 emontx_updater_ns = cg.esphome_ns.namespace("emontx_updater")
