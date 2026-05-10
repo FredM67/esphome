@@ -154,7 +154,12 @@ void EmonTxUpdater::on_flash_firmware_(std::string url) {
   }
   ESP_LOGI(TAG, "Bootloader entry sent — waiting %u ms for SAM-BA UART monitor to start",
            this->bootloader_timeout_ms_);
-  delay(this->bootloader_timeout_ms_);
+  // Feed the watchdog every 100 ms so the TWDT (default 3 s) does not fire
+  // during this multi-second wait.
+  for (uint32_t elapsed = 0; elapsed < this->bootloader_timeout_ms_; elapsed += 100) {
+    delay(100);
+    App.feed_wdt();
+  }
 
   // 4. Flash.
   bool ok = this->do_flash_(firmware);
@@ -756,22 +761,32 @@ void EmonTxUpdater::uart_write_(const uint8_t *data, size_t len) {
 
 bool EmonTxUpdater::uart_read_byte_(uint8_t &byte, uint32_t timeout_ms) {
   uint32_t deadline = millis() + timeout_ms;
+  uint32_t wdt_tick = millis();
   while (millis() < deadline) {
     if (this->emontx_->available() > 0 && this->emontx_->read_byte(&byte))
       return true;
     delay(1);
+    if (millis() - wdt_tick >= 100) {
+      App.feed_wdt();
+      wdt_tick = millis();
+    }
   }
   return false;
 }
 
 bool EmonTxUpdater::uart_read_bytes_(uint8_t *buf, size_t len, uint32_t timeout_ms) {
   uint32_t deadline = millis() + timeout_ms;
+  uint32_t wdt_tick = millis();
   size_t   read = 0;
   while (read < len && millis() < deadline) {
     if (this->emontx_->available() > 0 && this->emontx_->read_byte(&buf[read]))
       read++;
     else
       delay(1);
+    if (millis() - wdt_tick >= 100) {
+      App.feed_wdt();
+      wdt_tick = millis();
+    }
   }
   return read == len;
 }
