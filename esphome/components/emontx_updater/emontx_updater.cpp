@@ -5,6 +5,8 @@
 
 #include "esphome/core/application.h"
 #include "esphome/core/log.h"
+#include "esp_http_client.h"
+#include "esp_crt_bundle.h"
 
 namespace esphome::emontx_updater {
 
@@ -173,10 +175,57 @@ void EmonTxUpdater::on_flash_firmware_(std::string url) {
 // Download phase
 // ═════════════════════════════════════════════════════════════════════════════
 
-bool EmonTxUpdater::download_firmware_(const std::string &url, std::vector<uint8_t> &out) {
-  ESP_LOGI(TAG, "Downloading firmware from %s", url.c_str());
+std::string EmonTxUpdater::resolve_redirect_(const std::string &url) {
+  // GitHub release download URLs (github.com/releases/download/...) return a 302
+  // redirect to objects.githubusercontent.com.  The 302 response includes large
+  // security headers (CSP, Set-Cookie, etc.) that exceed http_request's buffer and
+  // cause esp_http_client_open to fail with ESP_FAIL / "Out of buffer".
+  // This method follows that single redirect using a dedicated esp_http_client with
+  // a 32 KB buffer, captures the Location header, and returns the direct CDN URL.
+  struct Ctx {
+    std::string location;
+  } ctx;
 
-  auto container = this->http_->get(url);
+  esp_http_client_config_t cfg = {};
+  cfg.url = url.c_str();
+  cfg.disable_auto_redirect = true;
+  cfg.buffer_size = 32768;
+  cfg.timeout_ms = 5000;
+  cfg.crt_bundle_attach = esp_crt_bundle_attach;
+  cfg.user_data = &ctx;
+  cfg.event_handler = [](esp_http_client_event_t *evt) -> esp_err_t {
+    if (evt->event_id == HTTP_EVENT_ON_HEADER && strcasecmp(evt->header_key, "Location") == 0)
+      static_cast<Ctx *>(evt->user_data)->location = evt->header_value;
+    return ESP_OK;
+  };
+
+  esp_http_client_handle_t client = esp_http_client_init(&cfg);
+  if (!client) {
+    ESP_LOGW(TAG, "resolve_redirect_: init failed, using original URL");
+    return url;
+  }
+
+  esp_err_t err = esp_http_client_perform(client);
+  esp_http_client_cleanup(client);
+
+  if (err != ESP_OK) {
+    ESP_LOGW(TAG, "resolve_redirect_: perform failed (%s), using original URL", esp_err_to_name(err));
+    return url;
+  }
+
+  if (!ctx.location.empty()) {
+    ESP_LOGI(TAG, "Resolved redirect → %s", ctx.location.c_str());
+    return ctx.location;
+  }
+
+  return url;  // no redirect — URL is already direct
+}
+
+bool EmonTxUpdater::download_firmware_(const std::string &url, std::vector<uint8_t> &out) {
+  const std::string download_url = this->resolve_redirect_(url);
+  ESP_LOGI(TAG, "Downloading firmware from %s", download_url.c_str());
+
+  auto container = this->http_->get(download_url);
   if (!container || container->status_code != 200) {
     ESP_LOGE(TAG, "HTTP GET failed (status %d)", container ? container->status_code : -1);
     if (container)
