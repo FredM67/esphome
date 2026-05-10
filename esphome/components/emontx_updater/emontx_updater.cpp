@@ -200,6 +200,7 @@ std::string EmonTxUpdater::resolve_redirect_(const std::string &url) {
     cfg.url = current.c_str();
     cfg.disable_auto_redirect = true;
     cfg.buffer_size = 32768;
+    cfg.buffer_size_tx = 4096;
     cfg.timeout_ms = 5000;
     cfg.crt_bundle_attach = esp_crt_bundle_attach;
     cfg.user_data = &ctx;
