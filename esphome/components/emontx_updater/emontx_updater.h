@@ -106,6 +106,11 @@ class EmonTxUpdater : public Component, public api::CustomAPIDevice {
   // ── Download phase ───────────────────────────────────────────────────────
   bool download_firmware_(const std::string &url, std::vector<uint8_t> &out);
 
+  // ── Firmware validation (runs before bootloader entry) ───────────────────
+  /// Sanity-check the downloaded binary without touching the SAMD21.
+  /// Verifies size bounds and ARM Cortex-M vector table (SP + reset vector).
+  bool validate_firmware_(const std::vector<uint8_t> &firmware);
+
   // ── Top-level flash orchestration (blocking) ─────────────────────────────
   bool do_flash_(const std::vector<uint8_t> &firmware);
 
