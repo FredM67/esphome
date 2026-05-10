@@ -90,6 +90,7 @@ class EmonTxUpdater : public Component, public api::CustomAPIDevice {
   void set_emontx(emontx::EmonTx *emontx) { this->emontx_ = emontx; }
   void set_http_request(http_request::HttpRequestComponent *http) { this->http_ = http; }
   void set_bootloader_timeout(uint32_t ms) { this->bootloader_timeout_ms_ = ms; }
+  void set_dry_run(bool dry_run) { this->dry_run_ = dry_run; }
 
   void setup() override;
   void dump_config() override;
@@ -99,6 +100,7 @@ class EmonTxUpdater : public Component, public api::CustomAPIDevice {
   emontx::EmonTx *emontx_{nullptr};
   http_request::HttpRequestComponent *http_{nullptr};
   uint32_t bootloader_timeout_ms_{5000};
+  bool dry_run_{false};
 
   // ── HA service entry point ───────────────────────────────────────────────
   void on_flash_firmware_(std::string url);  // NOLINT

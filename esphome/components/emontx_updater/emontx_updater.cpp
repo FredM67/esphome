@@ -89,6 +89,8 @@ void EmonTxUpdater::setup() {
 void EmonTxUpdater::dump_config() {
   ESP_LOGCONFIG(TAG, "EmonTx Updater:");
   ESP_LOGCONFIG(TAG, "  Bootloader timeout: %u ms", this->bootloader_timeout_ms_);
+  if (this->dry_run_)
+    ESP_LOGW(TAG, "  DRY RUN enabled — bootloader will NOT be entered");
   ESP_LOGCONFIG(TAG, "  IMPORTANT: OTA flash requires the UART SAM-BA bootloader on the emonTx6.");
   ESP_LOGCONFIG(TAG, "  If this is the first OTA flash, install it once via USB:");
   ESP_LOGCONFIG(TAG, "  copy change-bootloader-uart.uf2 from the emon32-fw release onto the EMONBOOT drive.");
@@ -120,6 +122,13 @@ void EmonTxUpdater::on_flash_firmware_(std::string url) {
     return;
   }
   this->fire_flash_status_("flashing", 15, "Firmware valid, entering bootloader");
+
+  // DRY RUN: stop here without touching the SAMD21 (remove dry_run: true from YAML when done).
+  if (this->dry_run_) {
+    ESP_LOGW(TAG, "DRY RUN — skipping bootloader entry and flash (dry_run: true in YAML)");
+    this->fire_flash_status_("complete", 100, "Dry run complete — device was NOT touched");
+    return;
+  }
 
   // 2. Pause the emontx parser so it does not consume SAM-BA response bytes.
   this->emontx_->set_paused(true);
