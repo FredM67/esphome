@@ -110,7 +110,16 @@ void EmonTxUpdater::on_flash_firmware_(std::string url) {
     return;
   }
   ESP_LOGI(TAG, "Downloaded %zu bytes", firmware.size());
-  this->fire_flash_status_("flashing", 10, "Firmware downloaded, entering bootloader");
+  this->fire_flash_status_("flashing", 10, "Firmware downloaded, validating");
+
+  // 2. Validate the binary before touching the SAMD21.
+  //    This is the last safe abort point — after this we enter bootloader mode.
+  if (!this->validate_firmware_(firmware)) {
+    ESP_LOGE(TAG, "Firmware validation failed — aborting before bootloader entry");
+    this->fire_flash_status_("failed", 0, "Firmware validation failed — device untouched");
+    return;
+  }
+  this->fire_flash_status_("flashing", 15, "Firmware valid, entering bootloader");
 
   // 2. Pause the emontx parser so it does not consume SAM-BA response bytes.
   this->emontx_->set_paused(true);
@@ -188,6 +197,66 @@ bool EmonTxUpdater::download_firmware_(const std::string &url, std::vector<uint8
     out.clear();
     return false;
   }
+  return true;
+}
+
+// ═════════════════════════════════════════════════════════════════════════════
+// Firmware validation
+// ═════════════════════════════════════════════════════════════════════════════
+
+bool EmonTxUpdater::validate_firmware_(const std::vector<uint8_t> &firmware) {
+  const size_t fw_size = firmware.size();
+
+  // ── Size bounds ───────────────────────────────────────────────────────────
+  // Minimum: must be at least two vector table entries (8 bytes).
+  // Maximum: SAMD21J17 application area = 128 KB total - 8 KB bootloader = 120 KB.
+  static constexpr size_t FW_MIN_SIZE = 8u;
+  static constexpr size_t FW_MAX_SIZE = 120u * 1024u;
+
+  if (fw_size < FW_MIN_SIZE) {
+    ESP_LOGE(TAG, "Firmware too small (%zu bytes)", fw_size);
+    return false;
+  }
+  if (fw_size > FW_MAX_SIZE) {
+    ESP_LOGE(TAG, "Firmware too large (%zu bytes, max %zu)", fw_size, FW_MAX_SIZE);
+    return false;
+  }
+
+  // ── ARM Cortex-M0+ vector table (first 8 bytes of the .bin) ──────────────
+  // [0..3] Initial stack pointer — must point into SAMD21J17 SRAM
+  //        (0x20000000 … 0x20004000, 16 KB).
+  // [4..7] Reset vector — must be an odd address (Thumb bit set) within the
+  //        application flash region (0x00002001 … 0x0001FFFF).
+  const uint32_t sp = (static_cast<uint32_t>(firmware[3]) << 24) |
+                      (static_cast<uint32_t>(firmware[2]) << 16) |
+                      (static_cast<uint32_t>(firmware[1]) << 8)  |
+                      static_cast<uint32_t>(firmware[0]);
+
+  const uint32_t reset_vec = (static_cast<uint32_t>(firmware[7]) << 24) |
+                              (static_cast<uint32_t>(firmware[6]) << 16) |
+                              (static_cast<uint32_t>(firmware[5]) << 8)  |
+                              static_cast<uint32_t>(firmware[4]);
+
+  static constexpr uint32_t SRAM_BASE = 0x20000000u;
+  static constexpr uint32_t SRAM_TOP  = 0x20004000u;  // 16 KB
+  static constexpr uint32_t APP_END   = 0x00020000u;  // 128 KB flash top
+
+  if (sp < SRAM_BASE || sp > SRAM_TOP) {
+    ESP_LOGE(TAG, "Invalid vector table: SP=0x%08X is outside SRAM (0x%08X–0x%08X)",
+             sp, SRAM_BASE, SRAM_TOP);
+    return false;
+  }
+  if ((reset_vec & 0x1u) == 0u) {
+    ESP_LOGE(TAG, "Invalid vector table: reset vector 0x%08X has no Thumb bit", reset_vec);
+    return false;
+  }
+  if ((reset_vec & ~0x1u) < SAMD21_APP_ADDR || (reset_vec & ~0x1u) >= APP_END) {
+    ESP_LOGE(TAG, "Invalid vector table: reset vector 0x%08X outside app flash (0x%08X–0x%08X)",
+             reset_vec, SAMD21_APP_ADDR, APP_END);
+    return false;
+  }
+
+  ESP_LOGI(TAG, "Firmware validated: %zu bytes, SP=0x%08X, PC=0x%08X", fw_size, sp, reset_vec);
   return true;
 }
 
