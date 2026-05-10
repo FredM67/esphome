@@ -176,49 +176,67 @@ void EmonTxUpdater::on_flash_firmware_(std::string url) {
 // ═════════════════════════════════════════════════════════════════════════════
 
 std::string EmonTxUpdater::resolve_redirect_(const std::string &url) {
-  // GitHub release download URLs (github.com/releases/download/...) return a 302
-  // redirect to objects.githubusercontent.com.  The 302 response includes large
-  // security headers (CSP, Set-Cookie, etc.) that exceed http_request's buffer and
-  // cause esp_http_client_open to fail with ESP_FAIL / "Out of buffer".
-  // This method follows that single redirect using a dedicated esp_http_client with
-  // a 32 KB buffer, captures the Location header, and returns the direct CDN URL.
+  // GitHub release URLs may chain through multiple redirects, each returning large
+  // security headers (CSP, cookies, etc.) that exceed http_request's buffer.
+  // Follow every hop using esp_http_client directly with a 32 KB buffer, fetching
+  // only headers (not the body) at each step, until we reach a non-3xx response.
+  // http_request then downloads from the final URL which has minimal headers.
   struct Ctx {
     std::string location;
   } ctx;
 
-  esp_http_client_config_t cfg = {};
-  cfg.url = url.c_str();
-  cfg.disable_auto_redirect = true;
-  cfg.buffer_size = 32768;
-  cfg.timeout_ms = 5000;
-  cfg.crt_bundle_attach = esp_crt_bundle_attach;
-  cfg.user_data = &ctx;
-  cfg.event_handler = [](esp_http_client_event_t *evt) -> esp_err_t {
+  auto location_handler = [](esp_http_client_event_t *evt) -> esp_err_t {
     if (evt->event_id == HTTP_EVENT_ON_HEADER && strcasecmp(evt->header_key, "Location") == 0)
       static_cast<Ctx *>(evt->user_data)->location = evt->header_value;
     return ESP_OK;
   };
 
-  esp_http_client_handle_t client = esp_http_client_init(&cfg);
-  if (!client) {
-    ESP_LOGW(TAG, "resolve_redirect_: init failed, using original URL");
-    return url;
+  std::string current = url;
+
+  for (int hop = 0; hop < 5; hop++) {
+    ctx.location.clear();
+
+    esp_http_client_config_t cfg = {};
+    cfg.url = current.c_str();
+    cfg.disable_auto_redirect = true;
+    cfg.buffer_size = 32768;
+    cfg.timeout_ms = 5000;
+    cfg.crt_bundle_attach = esp_crt_bundle_attach;
+    cfg.user_data = &ctx;
+    cfg.event_handler = location_handler;
+
+    esp_http_client_handle_t client = esp_http_client_init(&cfg);
+    if (!client) {
+      ESP_LOGW(TAG, "resolve_redirect_: init failed at hop %d", hop);
+      break;
+    }
+
+    bool redirect = false;
+    esp_err_t err = esp_http_client_open(client, 0);
+    if (err == ESP_OK) {
+      esp_http_client_fetch_headers(client);
+      int status = esp_http_client_get_status_code(client);
+      ESP_LOGD(TAG, "resolve_redirect_ hop %d: HTTP %d", hop, status);
+      if (status >= 300 && status < 400 && !ctx.location.empty()) {
+        current = ctx.location;
+        redirect = true;
+        ESP_LOGI(TAG, "  → %s", current.c_str());
+      }
+    } else {
+      ESP_LOGW(TAG, "resolve_redirect_ hop %d open failed: %s", hop, esp_err_to_name(err));
+    }
+
+    esp_http_client_close(client);
+    esp_http_client_cleanup(client);
+
+    if (!redirect)
+      break;
   }
 
-  esp_err_t err = esp_http_client_perform(client);
-  esp_http_client_cleanup(client);
+  if (current != url)
+    ESP_LOGI(TAG, "Final download URL: %s", current.c_str());
 
-  if (err != ESP_OK) {
-    ESP_LOGW(TAG, "resolve_redirect_: perform failed (%s), using original URL", esp_err_to_name(err));
-    return url;
-  }
-
-  if (!ctx.location.empty()) {
-    ESP_LOGI(TAG, "Resolved redirect → %s", ctx.location.c_str());
-    return ctx.location;
-  }
-
-  return url;  // no redirect — URL is already direct
+  return current;
 }
 
 bool EmonTxUpdater::download_firmware_(const std::string &url, std::vector<uint8_t> &out) {
