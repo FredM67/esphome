@@ -16,8 +16,6 @@ static constexpr uint32_t SAMD21_PAGES         = 2048u;
 static constexpr uint32_t SAMD21_PAGE_SIZE     = 64u;        // bytes per page
 static constexpr uint32_t SAMD21_PAGES_PER_ROW = 4u;         // pages per erase row
 static constexpr uint32_t SAMD21_ROW_SIZE      = 256u;       // bytes per erase row
-static constexpr uint32_t SAMD21_APPLET_ADDR   = 0x20002000u; // SRAM base for applet
-static constexpr uint32_t SAMD21_STACK_ADDR    = 0x20004000u; // top of 16 KB SRAM
 
 // ─── NVM controller register offsets from NVM_BASE (SAMD21 datasheet §22) ─
 static constexpr uint32_t NVM_BASE        = 0x41004000u;
@@ -31,31 +29,14 @@ static constexpr uint32_t NVM_CMDEX_KEY      = 0xA500u; // key for all CTRLA com
 static constexpr uint8_t  NVM_CMD_ER         = 0x02u;   // Erase Row
 static constexpr uint8_t  NVM_CMD_WP         = 0x04u;   // Write Page
 static constexpr uint8_t  NVM_CMD_PBC        = 0x44u;   // Page Buffer Clear
-static constexpr uint32_t NVM_STATUS_ERR_MASK = 0xFFEBu; // writable error-clear bits
+// W1C bits in STATUS: bit2=PROGE, bit3=LOCKE, bit4=NVME (writing 1 clears them).
+static constexpr uint32_t NVM_STATUS_ERR_MASK = 0x001Cu; // clear PROGE|LOCKE|NVME
 static constexpr uint32_t NVM_CTRLB_MANW_BIT  = (1u << 7);  // manual write enable
 static constexpr uint32_t NVM_CTRLB_CACHE_BIT = (1u << 18); // cache disable
 
 // ─── ARM Cortex-M reset register (used for software reset after flashing) ─
 static constexpr uint32_t ARM_AIRCR_ADDR  = 0xE000ED0Cu;
 static constexpr uint32_t ARM_AIRCR_RESET = 0x05FA0004u;
-
-// ─── WordCopy applet layout in SAMD21 SRAM ────────────────────────────────
-// The applet binary occupies APPLET_CODE_SIZE bytes starting at SAMD21_APPLET_ADDR.
-// The last 24 bytes of that block are a parameter region the applet reads via LDR:
-//   +0x20: initial stack pointer  (filled once during applet upload)
-//   +0x24: reset vector (PC+1)    (filled per runv() call)
-//   +0x28: dst_addr               (flash page byte address, filled per page)
-//   +0x2C: src_addr               (SRAM page buffer address, filled per page)
-//   +0x30: words to copy          (filled once: PAGE_SIZE/4 = 16)
-static constexpr size_t   APPLET_CODE_SIZE      = 52u;
-static constexpr uint32_t APPLET_STACK_OFF      = 0x20u;
-static constexpr uint32_t APPLET_RESET_OFF      = 0x24u;
-static constexpr uint32_t APPLET_DST_ADDR_OFF   = 0x28u;
-static constexpr uint32_t APPLET_SRC_ADDR_OFF   = 0x2Cu;
-static constexpr uint32_t APPLET_WORDS_OFF      = 0x30u;
-// APPLET_CODE_SIZE (52) is already word-aligned, so page buffers start right after.
-static constexpr uint32_t PAGE_BUFFER_A = SAMD21_APPLET_ADDR + APPLET_CODE_SIZE; // 0x20002034
-static constexpr uint32_t PAGE_BUFFER_B = PAGE_BUFFER_A + SAMD21_PAGE_SIZE;      // 0x20002074
 
 // ─── SAM-BA / XModem constants ────────────────────────────────────────────
 static constexpr uint8_t XMODEM_SOH       = 0x01u;
@@ -79,11 +60,16 @@ static constexpr int     XMODEM_MAX_RETRIES = 5;
  *   2. Component downloads the binary via http_request into ESP32 SRAM (~60 KB)
  *   3. emonTx firmware is commanded into SAM-BA bootloader mode via 'e'/'y' sequence
  *   4. SAM-BA handshake (auto-baud, N#, V#)
- *   5. WordCopy applet uploaded to SAMD21 SRAM
- *   6. For each 256-byte row: erase row, write 4×64-byte pages via applet
+ *   5. NVM CTRLB: disable cache, set MANW=1 (manual page write)
+ *   6. For each 256-byte row: ER (erase row)
+ *      For each 64-byte page: PBC + 16× W (fill page buffer) + WP (write page)
  *   7. ARM AIRCR software reset → SAMD21 boots new firmware
  *
- * References: BOSSA Samba.cpp, D2xNvmFlash.cpp, WordCopyArm.cpp (ShumaTech)
+ * Page buffer fill uses 16× SAM-BA 'W' (32-bit word write) commands directly
+ * to flash addresses.  With MANW=1 the NVM controller captures these writes
+ * into its page buffer without auto-programming; WP then commits the buffer.
+ *
+ * References: BOSSA Samba.cpp, D2xNvmFlash.cpp (ShumaTech); SAMD21 datasheet §22
  */
 class EmonTxUpdater : public Component, public api::CustomAPIDevice {
  public:
@@ -139,20 +125,15 @@ class EmonTxUpdater : public Component, public api::CustomAPIDevice {
   static uint16_t crc16_(const uint8_t *data, size_t len);
 
   // ── D2x NVM flash layer (maps to BOSSA D2xNvmFlash.cpp) ─────────────────
-  /// Upload the WordCopy applet to SRAM and set stack/words parameters.
-  bool flash_upload_applet_();
   /// Poll NVM INTFLAG.READY until set (or timeout).
   bool nvm_wait_ready_(uint32_t timeout_ms = 3000);
   /// Execute one NVM command: waitReady + write CTRLA + waitReady + check error.
   bool nvm_command_(uint8_t cmd);
   /// Erase the 256-byte row starting at row_byte_addr.
   bool nvm_erase_row_(uint32_t row_byte_addr);
-  /**
-   * Write one 64-byte page to flash.
-   * @param page_idx  Absolute page index (0 … SAMD21_PAGES-1).
-   * @param data      Exactly SAMD21_PAGE_SIZE bytes to write.
-   * @param use_buf_a Use PAGE_BUFFER_A (true) or PAGE_BUFFER_B (false).
-   */
+  /// Write one 64-byte page to flash: PBC + 16× W (fill page buffer) + WP.
+  /// @param page_idx  Absolute page index (0 … SAMD21_PAGES-1).
+  /// @param data      Exactly SAMD21_PAGE_SIZE bytes to write.
   bool nvm_write_page_(uint32_t page_idx, const uint8_t *data);
 
   // ── UART helpers (all go through emontx_'s UARTDevice interface) ─────────

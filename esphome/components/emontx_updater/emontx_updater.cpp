@@ -12,38 +12,6 @@ namespace esphome::emontx_updater {
 
 static const char *const TAG = "emontx_updater";
 
-// ─── WordCopy applet binary for ARM Cortex-M0+ ───────────────────────────
-// Source: BOSSA project, src/WordCopyArm.cpp (ShumaTech, BSD license).
-// This 52-byte Thumb-2 program runs on the SAMD21; it copies `words` 32-bit
-// words from src_addr to dst_addr. Parameters are embedded in the data region
-// at the end of the code blob (offsets 0x20…0x33) and are written via SAM-BA
-// 'W' commands before each invocation.
-static const uint8_t WORD_COPY_APPLET[APPLET_CODE_SIZE] = {
-    // Executable Thumb-2 instructions (bytes 0x00–0x1F, 32 bytes / 16 words)
-    0x09, 0x48,  // ldr  r0, [pc, #36]  ; = dst_addr
-    0x0a, 0x49,  // ldr  r1, [pc, #40]  ; = src_addr
-    0x0a, 0x4a,  // ldr  r2, [pc, #40]  ; = words
-    0x02, 0xe0,  // b    +8             ; branch over loop body (first iteration pre-check)
-    0x08, 0xc9,  // ldmia r1!, {r3}    ; load 1 word from src (advances r1 by 4)
-    0x08, 0xc0,  // stmia r0!, {r3}    ; store 1 word to dst  (advances r0 by 4)
-    0x01, 0x3a,  // subs  r2, r2, #1
-    0x00, 0x2a,  // cmp   r2, #0
-    0xfa, 0xd1,  // bne   -12           ; loop
-    0x04, 0x48,  // ldr   r0, [pc, #16] ; = stack (used as "completion signal" check)
-    0x00, 0x28,  // cmp   r0, #0
-    0x01, 0xd1,  // bne   +4
-    0x01, 0x48,  // ldr   r0, [pc, #4]
-    0x85, 0x46,  // mov   sp, r0        ; restore SP from parameter area
-    0x70, 0x47,  // bx    lr            ; return to SAM-BA monitor
-    0xc0, 0x46,  // nop                 ; padding to reach 4-byte alignment
-    // Parameter region (bytes 0x20–0x33), initialised to zero; filled by host:
-    0x00, 0x00, 0x00, 0x00,  // [+0x20] initial stack pointer  (= SAMD21_STACK_ADDR)
-    0x00, 0x00, 0x00, 0x00,  // [+0x24] reset vector / PC+1    (= SAMD21_APPLET_ADDR+1)
-    0x00, 0x00, 0x00, 0x00,  // [+0x28] dst_addr
-    0x00, 0x00, 0x00, 0x00,  // [+0x2C] src_addr
-    0x00, 0x00, 0x00, 0x00,  // [+0x30] words count            (= PAGE_SIZE/4 = 16)
-};
-
 // ─── CRC-16/CCITT lookup table (from BOSSA Samba.cpp, ShumaTech, BSD) ────
 static const uint16_t CRC16_TABLE[256] = {
     0x0000, 0x1021, 0x2042, 0x3063, 0x4084, 0x50a5, 0x60c6, 0x70e7,
@@ -381,9 +349,10 @@ bool EmonTxUpdater::do_flash_(const std::vector<uint8_t> &firmware) {
   }
 
   // ── Page-by-page write ────────────────────────────────────────────────────
-  // Write each 64-byte page directly to its flash address via SAM-BA XModem.
-  // With MANW=1 the NVM controller captures writes into its page buffer without
-  // programming; WP then programs the buffer.  No WordCopy applet is needed.
+  // For each page: PBC (clear page buffer), then 16× SAM-BA 'W' 32-bit word
+  // writes to the flash page address.  With MANW=1, the NVM controller holds
+  // these writes in its page buffer without auto-programming; the WP command
+  // then commits the buffer to flash.  (SAMD21 datasheet §22.8.7)
   this->fire_flash_status_("flashing", 25, "Writing flash pages");
   uint8_t page_data[SAMD21_PAGE_SIZE];
 
@@ -629,29 +598,6 @@ bool EmonTxUpdater::xmodem_send_(const uint8_t *data, size_t size) {
 // D2x NVM flash layer
 // ═════════════════════════════════════════════════════════════════════════════
 
-bool EmonTxUpdater::flash_upload_applet_() {
-  ESP_LOGD(TAG, "Uploading WordCopy applet to 0x%08X", SAMD21_APPLET_ADDR);
-
-  // Upload the 52-byte applet code to SAMD21 SRAM via XModem.
-  if (!this->samba_write_(SAMD21_APPLET_ADDR, WORD_COPY_APPLET, APPLET_CODE_SIZE)) {
-    ESP_LOGE(TAG, "Applet XModem transfer failed");
-    return false;
-  }
-
-  // Set the initial stack pointer (= top of SAMD21 SRAM).
-  if (!this->samba_write_word_(SAMD21_APPLET_ADDR + APPLET_STACK_OFF, SAMD21_STACK_ADDR))
-    return false;
-
-  // Set the words-to-copy count (one page = 16 32-bit words).
-  if (!this->samba_write_word_(SAMD21_APPLET_ADDR + APPLET_WORDS_OFF,
-                               SAMD21_PAGE_SIZE / sizeof(uint32_t)))
-    return false;
-
-  ESP_LOGD(TAG, "WordCopy applet ready (page buffers A=0x%08X B=0x%08X)",
-           PAGE_BUFFER_A, PAGE_BUFFER_B);
-  return true;
-}
-
 bool EmonTxUpdater::nvm_wait_ready_(uint32_t timeout_ms) {
   uint32_t deadline = millis() + timeout_ms;
   while (millis() < deadline) {
@@ -692,45 +638,58 @@ bool EmonTxUpdater::nvm_erase_row_(uint32_t row_byte_addr) {
   if (!this->nvm_wait_ready_())
     return false;
 
-  // Clear any pending error bits in STATUS.
-  uint32_t status = 0;
-  if (!this->samba_read_word_(NVM_BASE + NVM_REG_STATUS, status))
-    return false;
-  if (!this->samba_write_word_(NVM_BASE + NVM_REG_STATUS, status | NVM_STATUS_ERR_MASK))
-    return false;
+  // Clear PROGE/LOCKE/NVME error bits in STATUS (W1C: writing 1 clears).
+  // We don't read-modify-write — just assert all three clear bits (reserved bits are write-ignored).
+  this->samba_write_word_(NVM_BASE + NVM_REG_STATUS, NVM_STATUS_ERR_MASK);
 
   // Write the word address (byte_addr / 2) to ADDR, then issue ERASE ROW.
   if (!this->samba_write_word_(NVM_BASE + NVM_REG_ADDR, row_byte_addr / 2u))
     return false;
-  return this->nvm_command_(NVM_CMD_ER);
+  bool ok = this->nvm_command_(NVM_CMD_ER);
+  if (!ok)
+    ESP_LOGE(TAG, "nvm_erase_row_ failed at 0x%08X", row_byte_addr);
+  return ok;
 }
 
 bool EmonTxUpdater::nvm_write_page_(uint32_t page_idx, const uint8_t *data) {
   const uint32_t page_byte_addr = SAMD21_APP_ADDR + page_idx * SAMD21_PAGE_SIZE;
 
   // 1. Clear the NVM page buffer.
-  if (!this->nvm_command_(NVM_CMD_PBC))
+  if (!this->nvm_command_(NVM_CMD_PBC)) {
+    ESP_LOGE(TAG, "nvm_write_page_ PBC failed at page %u", page_idx);
     return false;
+  }
 
-  // 2. Fill the NVM page buffer using explicit 32-bit word writes via SAM-BA 'W'.
-  //    SAMD21 NVM requires 32-bit word writes for page buffer fills; the XModem
-  //    'S' command performs byte-wise writes internally which do not work for NVM
-  //    (byte writes to flash addresses are ignored or cause NVM to stall).
+  // 2. Fill the NVM page buffer using 16 SAM-BA 'W' 32-bit word writes.
+  //    With MANW=1 the NVM controller captures writes into its page buffer
+  //    without auto-programming.  (SAMD21 datasheet §22.8.7)
+  ESP_LOGV(TAG, "  page %u addr=0x%08X: filling page buffer", page_idx, page_byte_addr);
   for (size_t i = 0; i < SAMD21_PAGE_SIZE; i += 4) {
     const uint32_t word = static_cast<uint32_t>(data[i])
                         | (static_cast<uint32_t>(data[i + 1]) << 8)
                         | (static_cast<uint32_t>(data[i + 2]) << 16)
                         | (static_cast<uint32_t>(data[i + 3]) << 24);
-    if (!this->samba_write_word_(page_byte_addr + i, word))
+    if (!this->samba_write_word_(page_byte_addr + i, word)) {
+      ESP_LOGE(TAG, "nvm_write_page_ W word %zu failed at page %u", i / 4, page_idx);
       return false;
+    }
   }
 
-  // 3. Wait for NVM ready, set ADDR, issue Write Page.
-  if (!this->nvm_wait_ready_())
+  // 3. Wait for NVM ready, set ADDR explicitly, issue Write Page.
+  //    (ADDR is also updated automatically by the last W write above, but
+  //     setting it explicitly matches BOSSA's behaviour and avoids ambiguity.)
+  if (!this->nvm_wait_ready_()) {
+    ESP_LOGE(TAG, "nvm_write_page_ wait-ready (pre-WP) timeout at page %u", page_idx);
     return false;
+  }
   if (!this->samba_write_word_(NVM_BASE + NVM_REG_ADDR, page_byte_addr / 2u))
     return false;
-  return this->nvm_command_(NVM_CMD_WP);
+  bool ok = this->nvm_command_(NVM_CMD_WP);
+  if (!ok)
+    ESP_LOGE(TAG, "nvm_write_page_ WP failed at page %u (addr 0x%08X)", page_idx, page_byte_addr);
+  else
+    ESP_LOGV(TAG, "  page %u written OK", page_idx);
+  return ok;
 }
 
 // ═════════════════════════════════════════════════════════════════════════════
