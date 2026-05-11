@@ -380,19 +380,11 @@ bool EmonTxUpdater::do_flash_(const std::vector<uint8_t> &firmware) {
     return false;
   }
 
-  // ── Upload WordCopy applet to SAMD21 SRAM ─────────────────────────────────
-  if (!this->flash_upload_applet_()) {
-    ESP_LOGE(TAG, "Applet upload failed");
-    return false;
-  }
-  this->fire_flash_status_("flashing", 25, "Writing flash pages");
-
   // ── Page-by-page write ────────────────────────────────────────────────────
-  // Ping-pong between the two SRAM page buffers (A/B) to slightly improve
-  // throughput: while SAM-BA processes NVM_CMD_WP for one page, the host can
-  // begin uploading the next page's data into the other buffer.  In practice
-  // both operations are fast, so this is mostly a correctness measure.
-  bool use_buf_a = true;
+  // Write each 64-byte page directly to its flash address via SAM-BA XModem.
+  // With MANW=1 the NVM controller captures writes into its page buffer without
+  // programming; WP then programs the buffer.  No WordCopy applet is needed.
+  this->fire_flash_status_("flashing", 25, "Writing flash pages");
   uint8_t page_data[SAMD21_PAGE_SIZE];
 
   for (uint32_t page = 0; page < pages_needed; page++) {
@@ -416,11 +408,10 @@ bool EmonTxUpdater::do_flash_(const std::vector<uint8_t> &firmware) {
     if (copy_len < SAMD21_PAGE_SIZE)
       memset(page_data + copy_len, 0xFF, SAMD21_PAGE_SIZE - copy_len);
 
-    if (!this->nvm_write_page_(page, page_data, use_buf_a)) {
+    if (!this->nvm_write_page_(page, page_data)) {
       ESP_LOGE(TAG, "Page write failed at page %u", page);
       return false;
     }
-    use_buf_a = !use_buf_a;
 
     if (page % 64 == 0) {
       int pct = 25 + static_cast<int>(page * 70u / pages_needed);
@@ -714,41 +705,22 @@ bool EmonTxUpdater::nvm_erase_row_(uint32_t row_byte_addr) {
   return this->nvm_command_(NVM_CMD_ER);
 }
 
-bool EmonTxUpdater::nvm_write_page_(uint32_t page_idx, const uint8_t *data, bool use_buf_a) {
+bool EmonTxUpdater::nvm_write_page_(uint32_t page_idx, const uint8_t *data) {
   const uint32_t page_byte_addr = SAMD21_APP_ADDR + page_idx * SAMD21_PAGE_SIZE;
-  const uint32_t sram_buf_addr  = use_buf_a ? PAGE_BUFFER_A : PAGE_BUFFER_B;
 
-  // 1. Issue PBC (Page Buffer Clear) to clear the NVM's internal page buffer.
+  // 1. Clear the NVM page buffer so no stale data is programmed.
   if (!this->nvm_command_(NVM_CMD_PBC))
     return false;
 
-  // 2. Upload this page's data to the SRAM page buffer via SAM-BA XModem.
-  if (!this->samba_write_(sram_buf_addr, data, SAMD21_PAGE_SIZE))
+  // 2. Write page data directly to the flash page address via SAM-BA XModem.
+  //    With MANW=1, the NVM controller captures writes into its internal page
+  //    buffer without immediately programming them (BOSSA D2xNvmFlash approach).
+  if (!this->samba_write_(page_byte_addr, data, SAMD21_PAGE_SIZE))
     return false;
 
-  // 3. Invoke the WordCopy applet: copy SRAM buffer → NVM page buffer.
-  //    a. Set destination and source addresses in the applet parameter area.
-  if (!this->samba_write_word_(SAMD21_APPLET_ADDR + APPLET_DST_ADDR_OFF, page_byte_addr))
-    return false;
-  if (!this->samba_write_word_(SAMD21_APPLET_ADDR + APPLET_SRC_ADDR_OFF, sram_buf_addr))
-    return false;
-
-  //    b. runv(): write the Thumb-mode start address into the reset-vector slot,
-  //       then jump to the vector-table entry (stack slot) via SAM-BA 'G'.
-  //       The Cortex-M0+ loads SP from [stack_slot] and PC from [reset_slot].
-  if (!this->samba_write_word_(SAMD21_APPLET_ADDR + APPLET_RESET_OFF,
-                               SAMD21_APPLET_ADDR + 1u /* Thumb bit */))
-    return false;
-  if (!this->samba_go_(SAMD21_APPLET_ADDR + APPLET_STACK_OFF))
-    return false;
-
-  // 4. Wait for NVM to be ready (applet completes in microseconds; NVM is
-  //    driven by SAM-BA 'W' commands issued next, which are already buffered
-  //    in the SAMD21's UART hardware FIFO while the applet ran).
+  // 3. Wait for NVM ready, then set ADDR and issue Write Page.
   if (!this->nvm_wait_ready_())
     return false;
-
-  // 5. Program the NVM page buffer to flash: set ADDR, issue WRITE PAGE.
   if (!this->samba_write_word_(NVM_BASE + NVM_REG_ADDR, page_byte_addr / 2u))
     return false;
   return this->nvm_command_(NVM_CMD_WP);

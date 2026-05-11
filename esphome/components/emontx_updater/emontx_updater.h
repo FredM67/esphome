@@ -153,7 +153,7 @@ class EmonTxUpdater : public Component, public api::CustomAPIDevice {
    * @param data      Exactly SAMD21_PAGE_SIZE bytes to write.
    * @param use_buf_a Use PAGE_BUFFER_A (true) or PAGE_BUFFER_B (false).
    */
-  bool nvm_write_page_(uint32_t page_idx, const uint8_t *data, bool use_buf_a);
+  bool nvm_write_page_(uint32_t page_idx, const uint8_t *data);
 
   // ── UART helpers (all go through emontx_'s UARTDevice interface) ─────────
   void uart_flush_rx_();
