@@ -708,17 +708,24 @@ bool EmonTxUpdater::nvm_erase_row_(uint32_t row_byte_addr) {
 bool EmonTxUpdater::nvm_write_page_(uint32_t page_idx, const uint8_t *data) {
   const uint32_t page_byte_addr = SAMD21_APP_ADDR + page_idx * SAMD21_PAGE_SIZE;
 
-  // 1. Clear the NVM page buffer so no stale data is programmed.
+  // 1. Clear the NVM page buffer.
   if (!this->nvm_command_(NVM_CMD_PBC))
     return false;
 
-  // 2. Write page data directly to the flash page address via SAM-BA XModem.
-  //    With MANW=1, the NVM controller captures writes into its internal page
-  //    buffer without immediately programming them (BOSSA D2xNvmFlash approach).
-  if (!this->samba_write_(page_byte_addr, data, SAMD21_PAGE_SIZE))
-    return false;
+  // 2. Fill the NVM page buffer using explicit 32-bit word writes via SAM-BA 'W'.
+  //    SAMD21 NVM requires 32-bit word writes for page buffer fills; the XModem
+  //    'S' command performs byte-wise writes internally which do not work for NVM
+  //    (byte writes to flash addresses are ignored or cause NVM to stall).
+  for (size_t i = 0; i < SAMD21_PAGE_SIZE; i += 4) {
+    const uint32_t word = static_cast<uint32_t>(data[i])
+                        | (static_cast<uint32_t>(data[i + 1]) << 8)
+                        | (static_cast<uint32_t>(data[i + 2]) << 16)
+                        | (static_cast<uint32_t>(data[i + 3]) << 24);
+    if (!this->samba_write_word_(page_byte_addr + i, word))
+      return false;
+  }
 
-  // 3. Wait for NVM ready, then set ADDR and issue Write Page.
+  // 3. Wait for NVM ready, set ADDR, issue Write Page.
   if (!this->nvm_wait_ready_())
     return false;
   if (!this->samba_write_word_(NVM_BASE + NVM_REG_ADDR, page_byte_addr / 2u))
