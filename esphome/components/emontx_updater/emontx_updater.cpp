@@ -53,6 +53,9 @@ static const uint16_t CRC16_TABLE[256] = {
 // ═════════════════════════════════════════════════════════════════════════════
 
 void EmonTxUpdater::setup() {
+  this->status_queue_ = xQueueCreate(32, sizeof(FlashStatusPayload));
+  if (this->status_queue_ == nullptr)
+    ESP_LOGE(TAG, "Failed to create flash status queue — status events will be lost");
   register_service(&EmonTxUpdater::on_flash_firmware_, "flash_emontx6", {"url"});
 }
 
@@ -66,11 +69,35 @@ void EmonTxUpdater::dump_config() {
   ESP_LOGCONFIG(TAG, "  copy change-bootloader-uart.uf2 from the emon32-fw release onto the EMONBOOT drive.");
 }
 
+// ─── Main-loop thread: drain the status queue and fire HA events ─────────────
+// The background flash task posts FlashStatusPayload items to status_queue_.
+// We dispatch them here, on the main-loop thread, where ESPHome API calls are safe.
+void EmonTxUpdater::loop() {
+  if (this->status_queue_ == nullptr)
+    return;
+  FlashStatusPayload payload;
+  while (xQueueReceive(this->status_queue_, &payload, 0) == pdTRUE) {
+    if (!this->is_connected())
+      continue;
+    this->fire_homeassistant_event("esphome.emontx_flash_status", {
+        {"device_id", App.get_name().str()},
+        {"status",    std::string(payload.status)},
+        {"progress",  std::to_string(payload.progress)},
+        {"message",   std::string(payload.message)},
+    });
+  }
+}
+
 // ═════════════════════════════════════════════════════════════════════════════
 // HA service handler
 // ═════════════════════════════════════════════════════════════════════════════
 
 void EmonTxUpdater::on_flash_firmware_(std::string url) {
+  if (this->flash_task_running_) {
+    ESP_LOGW(TAG, "Flash already in progress — ignoring new request");
+    return;
+  }
+
   ESP_LOGI(TAG, "Flash request received for URL: %s", url.c_str());
   this->fire_flash_status_("started", 0, "Downloading firmware");
 
@@ -100,10 +127,10 @@ void EmonTxUpdater::on_flash_firmware_(std::string url) {
     return;
   }
 
-  // 2. Pause the emontx parser so it does not consume SAM-BA response bytes.
+  // 3. Pause the emontx parser so it does not consume SAM-BA response bytes.
   this->emontx_->set_paused(true);
 
-  // 3. Enter SAM-BA bootloader mode via the emon32 firmware two-step command.
+  // 4. Enter SAM-BA bootloader mode via the emon32 firmware two-step command.
   //    Source: emon32-fw src/configuration.c lines 853–862, 1195–1212.
   //    Step 1: send "e\r\n" — firmware prints a confirmation prompt.
   ESP_LOGI(TAG, "Sending bootloader entry step 1 ('e')");
@@ -122,26 +149,55 @@ void EmonTxUpdater::on_flash_firmware_(std::string url) {
   }
   ESP_LOGI(TAG, "Bootloader entry sent — waiting %u ms for SAM-BA UART monitor to start",
            this->bootloader_timeout_ms_);
-  // Feed the watchdog every 100 ms so the TWDT (default 3 s) does not fire
-  // during this multi-second wait.
+  // Feed the watchdog every 100 ms so the TWDT does not fire during this wait.
   for (uint32_t elapsed = 0; elapsed < this->bootloader_timeout_ms_; elapsed += 100) {
     delay(100);
     App.feed_wdt();
   }
 
-  // 4. Flash.
-  bool ok = this->do_flash_(firmware);
+  // 5. Hand firmware off to a FreeRTOS background task.
+  //    do_flash_() blocks for ~60 s — running it in a task keeps the main loop
+  //    alive (TWDT, API keepalive) and lets loop() dispatch status events to HA.
+  this->flash_pending_firmware_ = std::move(firmware);
+  this->flash_task_running_ = true;
+  BaseType_t rc = xTaskCreate(flash_task_fn_, "emontx_flash", 8192, this, 5,
+                               &this->flash_task_handle_);
+  if (rc != pdPASS) {
+    ESP_LOGE(TAG, "Failed to create flash task (err=%d) — aborting", static_cast<int>(rc));
+    this->flash_pending_firmware_.clear();
+    this->flash_task_running_ = false;
+    this->emontx_->set_paused(false);
+    this->fire_flash_status_("failed", 0, "Failed to start flash task");
+  }
+  // on_flash_firmware_ returns here; the task continues in the background.
+}
 
-  // 5. Resume normal emonTx serial parsing regardless of flash outcome.
-  this->emontx_->set_paused(false);
+// ═════════════════════════════════════════════════════════════════════════════
+// Background flash task
+// ═════════════════════════════════════════════════════════════════════════════
+
+// Runs on a FreeRTOS task (not the main loop).
+// Calls do_flash_(), resumes the emontx parser, posts the final status event,
+// then self-deletes.  The main loop's loop() dispatches the status events to HA.
+void EmonTxUpdater::flash_task_fn_(void *param) {
+  EmonTxUpdater *self = static_cast<EmonTxUpdater *>(param);
+
+  bool ok = self->do_flash_(self->flash_pending_firmware_);
+  self->flash_pending_firmware_.clear();
+
+  // Re-enable normal emonTx serial parsing.
+  self->emontx_->set_paused(false);
 
   if (ok) {
     ESP_LOGI(TAG, "Firmware flash complete — emonTx6 rebooting into new firmware");
-    this->fire_flash_status_("complete", 100, "Firmware flash complete");
+    self->fire_flash_status_("complete", 100, "Firmware flash complete");
   } else {
     ESP_LOGE(TAG, "Firmware flash FAILED. Power-cycle the emonTx6 to recover.");
-    this->fire_flash_status_("failed", 0, "Firmware flash failed — check ESPHome logs");
+    self->fire_flash_status_("failed", 0, "Firmware flash failed — check ESPHome logs");
   }
+
+  self->flash_task_running_ = false;  // signal loop() that no task is active
+  vTaskDelete(nullptr);               // self-delete
 }
 
 // ═════════════════════════════════════════════════════════════════════════════
@@ -377,6 +433,7 @@ bool EmonTxUpdater::do_flash_(const std::vector<uint8_t> &firmware) {
     if (copy_len < SAMD21_PAGE_SIZE)
       memset(page_data + copy_len, 0xFF, SAMD21_PAGE_SIZE - copy_len);
 
+    ESP_LOGD(TAG, "Writing page %u / %u (row %u)", page, pages_needed - 1, page / SAMD21_PAGES_PER_ROW);
     if (!this->nvm_write_page_(page, page_data)) {
       ESP_LOGE(TAG, "Page write failed at page %u", page);
       return false;
@@ -742,16 +799,19 @@ bool EmonTxUpdater::uart_read_bytes_(uint8_t *buf, size_t len, uint32_t timeout_
 // HA status event helper
 // ═════════════════════════════════════════════════════════════════════════════
 
+// Thread-safe: may be called from either the main loop or the flash task.
+// Posts to status_queue_; loop() drains the queue and calls fire_homeassistant_event
+// on the main-loop thread where ESPHome API calls are safe.
 void EmonTxUpdater::fire_flash_status_(const std::string &status, int progress,
                                        const std::string &message) {
-  if (!this->is_connected())
+  if (this->status_queue_ == nullptr)
     return;
-  this->fire_homeassistant_event("esphome.emontx_flash_status", {
-      {"device_id", App.get_name().str()},
-      {"status", status},
-      {"progress", std::to_string(progress)},
-      {"message", message},
-  });
+  FlashStatusPayload payload = {};
+  strncpy(payload.status,  status.c_str(),  sizeof(payload.status)  - 1);
+  strncpy(payload.message, message.c_str(), sizeof(payload.message) - 1);
+  payload.progress = progress;
+  // Non-blocking send; drop the event if the queue is full rather than deadlocking.
+  xQueueSend(this->status_queue_, &payload, 0);
 }
 
 }  // namespace esphome::emontx_updater

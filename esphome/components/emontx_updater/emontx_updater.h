@@ -3,6 +3,10 @@
 #include <string>
 #include <vector>
 
+#include "freertos/FreeRTOS.h"
+#include "freertos/queue.h"
+#include "freertos/task.h"
+
 #include "esphome/core/component.h"
 #include "esphome/components/api/custom_api_device.h"
 #include "esphome/components/emontx/emontx.h"
@@ -50,6 +54,14 @@ static constexpr int     XMODEM_MAX_RETRIES = 5;
 
 // ─────────────────────────────────────────────────────────────────────────
 
+// ─── Flash status event (posted from background task, dispatched in loop()) ──
+// Fixed-size struct so xQueueSend/Receive copies by value without heap ops.
+struct FlashStatusPayload {
+  char status[16];
+  int  progress;
+  char message[80];
+};
+
 /**
  * @class EmonTxUpdater
  * @brief Flashes new firmware into the ATSAMD21J17 on an emonTx6 board over
@@ -69,6 +81,11 @@ static constexpr int     XMODEM_MAX_RETRIES = 5;
  * to flash addresses.  With MANW=1 the NVM controller captures these writes
  * into its page buffer without auto-programming; WP then commits the buffer.
  *
+ * do_flash_() runs in a dedicated FreeRTOS task so the ESPHome main loop
+ * remains responsive (feeds TWDT, serves API) during the ~60 s flash.
+ * Status events are posted to status_queue_ from the task and dispatched to
+ * Home Assistant in loop() on the main-loop thread.
+ *
  * References: BOSSA Samba.cpp, D2xNvmFlash.cpp (ShumaTech); SAMD21 datasheet §22
  */
 class EmonTxUpdater : public Component, public api::CustomAPIDevice {
@@ -79,14 +96,25 @@ class EmonTxUpdater : public Component, public api::CustomAPIDevice {
   void set_dry_run(bool dry_run) { this->dry_run_ = dry_run; }
 
   void setup() override;
+  void loop() override;   ///< Drains status_queue_ and fires HA events (main-loop thread).
   void dump_config() override;
   float get_setup_priority() const override { return setup_priority::LATE; }
 
  protected:
   emontx::EmonTx *emontx_{nullptr};
   http_request::HttpRequestComponent *http_{nullptr};
-  uint32_t bootloader_timeout_ms_{5000};
+  uint32_t bootloader_timeout_ms_{500};
   bool dry_run_{false};
+
+  // ── Background flash task ─────────────────────────────────────────────────
+  /// Status events enqueued by the flash task; loop() dispatches them to HA.
+  QueueHandle_t  status_queue_{nullptr};
+  TaskHandle_t   flash_task_handle_{nullptr};
+  volatile bool  flash_task_running_{false};
+  /// Firmware binary handed off to the background task.
+  std::vector<uint8_t> flash_pending_firmware_;
+  /// Background task entry point (static, calls do_flash_ on this).
+  static void flash_task_fn_(void *param);
 
   // ── HA service entry point ───────────────────────────────────────────────
   void on_flash_firmware_(std::string url);  // NOLINT
