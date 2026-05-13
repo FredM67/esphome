@@ -58,7 +58,7 @@ class EmonTx final : public Component, public uart::UARTDevice {
  protected:
   void parse_json_(const char *data, size_t len);
 
-  bool paused_{false};
+  volatile bool paused_{false};
 
 #ifdef USE_SENSOR
   FixedVector<std::pair<const char *, sensor::Sensor *>> sensors_{};
