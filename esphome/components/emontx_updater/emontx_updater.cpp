@@ -1,5 +1,6 @@
 #include "emontx_updater.h"
 
+#include <cinttypes>
 #include <cstdio>
 #include <cstring>
 
@@ -61,7 +62,7 @@ void EmonTxUpdater::setup() {
 
 void EmonTxUpdater::dump_config() {
   ESP_LOGCONFIG(TAG, "EmonTx Updater:");
-  ESP_LOGCONFIG(TAG, "  Bootloader timeout: %u ms", this->bootloader_timeout_ms_);
+  ESP_LOGCONFIG(TAG, "  Bootloader timeout: %" PRIu32 " ms", this->bootloader_timeout_ms_);
   if (this->dry_run_)
     ESP_LOGW(TAG, "  DRY RUN enabled — bootloader will NOT be entered");
   ESP_LOGCONFIG(TAG, "  IMPORTANT: OTA flash requires the UART SAM-BA bootloader on the emonTx6.");
@@ -147,7 +148,7 @@ void EmonTxUpdater::on_flash_firmware_(std::string url) {
     const uint8_t cmd_y[] = {'y', '\r', '\n'};
     this->uart_write_(cmd_y, sizeof(cmd_y));
   }
-  ESP_LOGI(TAG, "Bootloader entry sent — waiting %u ms for SAM-BA UART monitor to start",
+  ESP_LOGI(TAG, "Bootloader entry sent — waiting %" PRIu32 " ms for SAM-BA UART monitor to start",
            this->bootloader_timeout_ms_);
   // Feed the watchdog every 100 ms so the TWDT does not fire during this wait.
   for (uint32_t elapsed = 0; elapsed < this->bootloader_timeout_ms_; elapsed += 100) {
@@ -348,21 +349,21 @@ bool EmonTxUpdater::validate_firmware_(const std::vector<uint8_t> &firmware) {
   static constexpr uint32_t APP_END   = 0x00020000u;  // 128 KB flash top
 
   if (sp < SRAM_BASE || sp > SRAM_TOP) {
-    ESP_LOGE(TAG, "Invalid vector table: SP=0x%08X is outside SRAM (0x%08X–0x%08X)",
+    ESP_LOGE(TAG, "Invalid vector table: SP=0x%08" PRIX32 " is outside SRAM (0x%08" PRIX32 "–0x%08" PRIX32 ")",
              sp, SRAM_BASE, SRAM_TOP);
     return false;
   }
   if ((reset_vec & 0x1u) == 0u) {
-    ESP_LOGE(TAG, "Invalid vector table: reset vector 0x%08X has no Thumb bit", reset_vec);
+    ESP_LOGE(TAG, "Invalid vector table: reset vector 0x%08" PRIX32 " has no Thumb bit", reset_vec);
     return false;
   }
   if ((reset_vec & ~0x1u) < SAMD21_APP_ADDR || (reset_vec & ~0x1u) >= APP_END) {
-    ESP_LOGE(TAG, "Invalid vector table: reset vector 0x%08X outside app flash (0x%08X–0x%08X)",
+    ESP_LOGE(TAG, "Invalid vector table: reset vector 0x%08" PRIX32 " outside app flash (0x%08" PRIX32 "–0x%08" PRIX32 ")",
              reset_vec, SAMD21_APP_ADDR, APP_END);
     return false;
   }
 
-  ESP_LOGI(TAG, "Firmware validated: %zu bytes, SP=0x%08X, PC=0x%08X", fw_size, sp, reset_vec);
+  ESP_LOGI(TAG, "Firmware validated: %zu bytes, SP=0x%08" PRIX32 ", PC=0x%08" PRIX32, fw_size, sp, reset_vec);
   return true;
 }
 
@@ -375,7 +376,7 @@ bool EmonTxUpdater::do_flash_(const std::vector<uint8_t> &firmware) {
 
   // Compute number of complete + partial pages needed.
   const uint32_t pages_needed = (fw_size + SAMD21_PAGE_SIZE - 1) / SAMD21_PAGE_SIZE;
-  ESP_LOGI(TAG, "Flashing %zu bytes → %u pages (%u rows)", fw_size, pages_needed,
+  ESP_LOGI(TAG, "Flashing %zu bytes → %" PRIu32 " pages (%" PRIu32 " rows)", fw_size, pages_needed,
            (pages_needed + SAMD21_PAGES_PER_ROW - 1) / SAMD21_PAGES_PER_ROW);
 
   // ── SAM-BA handshake ──────────────────────────────────────────────────────
@@ -418,9 +419,9 @@ bool EmonTxUpdater::do_flash_(const std::vector<uint8_t> &firmware) {
     // Erase the row at the start of every 4-page group.
     if (page % SAMD21_PAGES_PER_ROW == 0) {
       uint32_t row_byte_addr = SAMD21_APP_ADDR + page * SAMD21_PAGE_SIZE;
-      ESP_LOGD(TAG, "Erasing row %u (addr 0x%08X)", page / SAMD21_PAGES_PER_ROW, row_byte_addr);
+      ESP_LOGD(TAG, "Erasing row %" PRIu32 " (addr 0x%08" PRIX32 ")", page / SAMD21_PAGES_PER_ROW, row_byte_addr);
       if (!this->nvm_erase_row_(row_byte_addr)) {
-        ESP_LOGE(TAG, "Row erase failed at page %u", page);
+        ESP_LOGE(TAG, "Row erase failed at page %" PRIu32, page);
         return false;
       }
     }
@@ -433,18 +434,18 @@ bool EmonTxUpdater::do_flash_(const std::vector<uint8_t> &firmware) {
     if (copy_len < SAMD21_PAGE_SIZE)
       memset(page_data + copy_len, 0xFF, SAMD21_PAGE_SIZE - copy_len);
 
-    ESP_LOGD(TAG, "Writing page %u / %u (row %u)", page, pages_needed - 1, page / SAMD21_PAGES_PER_ROW);
+    ESP_LOGD(TAG, "Writing page %" PRIu32 " / %" PRIu32 " (row %" PRIu32 ")", page, pages_needed - 1, page / SAMD21_PAGES_PER_ROW);
     if (!this->nvm_write_page_(page, page_data)) {
-      ESP_LOGE(TAG, "Page write failed at page %u", page);
+      ESP_LOGE(TAG, "Page write failed at page %" PRIu32, page);
       return false;
     }
 
     if (page % 64 == 0) {
       int pct = 25 + static_cast<int>(page * 70u / pages_needed);
       char msg[32];
-      snprintf(msg, sizeof(msg), "Page %u / %u", page, pages_needed);
+      snprintf(msg, sizeof(msg), "Page %" PRIu32 " / %" PRIu32, page, pages_needed);
       this->fire_flash_status_("flashing", pct, msg);
-      ESP_LOGI(TAG, "Progress: %u/%u pages", page, pages_needed);
+      ESP_LOGI(TAG, "Progress: %" PRIu32 "/%" PRIu32 " pages", page, pages_needed);
     }
   }
 
@@ -528,7 +529,7 @@ bool EmonTxUpdater::samba_read_word_(uint32_t addr, uint32_t &value_out) {
 
   uint8_t buf[4];
   if (!this->uart_read_bytes_(buf, 4, 500)) {
-    ESP_LOGE(TAG, "samba_read_word_ timeout (addr=0x%08X)", addr);
+    ESP_LOGE(TAG, "samba_read_word_ timeout (addr=0x%08" PRIX32 ")", addr);
     return false;
   }
   value_out = (static_cast<uint32_t>(buf[3]) << 24) |
@@ -665,7 +666,7 @@ bool EmonTxUpdater::nvm_wait_ready_(uint32_t timeout_ms) {
       return true;
     App.feed_wdt();
   }
-  ESP_LOGE(TAG, "NVM not ready (timeout %u ms)", timeout_ms);
+  ESP_LOGE(TAG, "NVM not ready (timeout %" PRIu32 " ms)", timeout_ms);
   return false;
 }
 
@@ -683,7 +684,7 @@ bool EmonTxUpdater::nvm_command_(uint8_t cmd) {
   if (!this->samba_read_word_(NVM_BASE + NVM_REG_INTFLAG, intflag))
     return false;
   if (intflag & 0x2u) {
-    ESP_LOGE(TAG, "NVM command 0x%02X produced an error (INTFLAG=0x%08X)", cmd, intflag);
+    ESP_LOGE(TAG, "NVM command 0x%02X produced an error (INTFLAG=0x%08" PRIX32 ")", cmd, intflag);
     // Clear the error bit.
     this->samba_write_word_(NVM_BASE + NVM_REG_INTFLAG, 0x2u);
     return false;
@@ -704,7 +705,7 @@ bool EmonTxUpdater::nvm_erase_row_(uint32_t row_byte_addr) {
     return false;
   bool ok = this->nvm_command_(NVM_CMD_ER);
   if (!ok)
-    ESP_LOGE(TAG, "nvm_erase_row_ failed at 0x%08X", row_byte_addr);
+    ESP_LOGE(TAG, "nvm_erase_row_ failed at 0x%08" PRIX32, row_byte_addr);
   return ok;
 }
 
@@ -713,7 +714,7 @@ bool EmonTxUpdater::nvm_write_page_(uint32_t page_idx, const uint8_t *data) {
 
   // 1. Clear the NVM page buffer.
   if (!this->nvm_command_(NVM_CMD_PBC)) {
-    ESP_LOGE(TAG, "nvm_write_page_ PBC failed at page %u", page_idx);
+    ESP_LOGE(TAG, "nvm_write_page_ PBC failed at page %" PRIu32, page_idx);
     return false;
   }
 
@@ -727,7 +728,7 @@ bool EmonTxUpdater::nvm_write_page_(uint32_t page_idx, const uint8_t *data) {
                         | (static_cast<uint32_t>(data[i + 2]) << 16)
                         | (static_cast<uint32_t>(data[i + 3]) << 24);
     if (!this->samba_write_word_(page_byte_addr + i, word)) {
-      ESP_LOGE(TAG, "nvm_write_page_ W word %zu failed at page %u", i / 4, page_idx);
+      ESP_LOGE(TAG, "nvm_write_page_ W word %zu failed at page %" PRIu32, i / 4, page_idx);
       return false;
     }
   }
@@ -736,16 +737,17 @@ bool EmonTxUpdater::nvm_write_page_(uint32_t page_idx, const uint8_t *data) {
   //    (ADDR is also updated automatically by the last W write above, but
   //     setting it explicitly matches BOSSA's behaviour and avoids ambiguity.)
   if (!this->nvm_wait_ready_()) {
-    ESP_LOGE(TAG, "nvm_write_page_ wait-ready (pre-WP) timeout at page %u", page_idx);
+    ESP_LOGE(TAG, "nvm_write_page_ wait-ready (pre-WP) timeout at page %" PRIu32, page_idx);
     return false;
   }
   if (!this->samba_write_word_(NVM_BASE + NVM_REG_ADDR, page_byte_addr / 2u))
     return false;
   bool ok = this->nvm_command_(NVM_CMD_WP);
   if (!ok)
-    ESP_LOGE(TAG, "nvm_write_page_ WP failed at page %u (addr 0x%08X)", page_idx, page_byte_addr);
-  else
-    ESP_LOGV(TAG, "  page %u written OK", page_idx);
+    ESP_LOGE(TAG, "nvm_write_page_ WP failed at page %" PRIu32 " (addr 0x%08" PRIX32 ")", page_idx, page_byte_addr);
+  else {
+    ESP_LOGV(TAG, "  page %" PRIu32 " written OK", page_idx);
+  }
   return ok;
 }
 
