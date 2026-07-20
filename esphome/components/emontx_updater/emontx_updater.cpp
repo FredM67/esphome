@@ -6,7 +6,6 @@
 
 #include "esphome/core/application.h"
 #include "esphome/core/log.h"
-#include "esp_http_client.h"
 #include "esp_crt_bundle.h"
 
 namespace esphome::emontx_updater {
