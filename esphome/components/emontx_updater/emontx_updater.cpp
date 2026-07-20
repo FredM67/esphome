@@ -602,10 +602,10 @@ bool EmonTxUpdater::samba_init_() {
   for (uint32_t waited = 0; waited <= RETRY_MAX_MS; waited += RETRY_PERIOD_MS) {
     this->uart_flush_rx_();
     if (this->samba_version_(ver)) {
-      ESP_LOGD(TAG, "SAM-BA handshake OK after %u ms extra, version: %s", waited, ver.c_str());
+      ESP_LOGD(TAG, "SAM-BA handshake OK after %" PRIu32 " ms extra, version: %s", waited, ver.c_str());
       return true;
     }
-    ESP_LOGD(TAG, "SAM-BA not ready yet (waited %u ms)...", waited);
+    ESP_LOGD(TAG, "SAM-BA not ready yet (waited %" PRIu32 " ms)...", waited);
     delay(RETRY_PERIOD_MS);
     App.feed_wdt();
     // Re-send auto-baud + N# on each retry so SAM-BA can lock on.
@@ -621,7 +621,7 @@ bool EmonTxUpdater::samba_init_() {
     this->uart_write_(n_cmd, sizeof(n_cmd));
     this->uart_read_bytes_(discard, 2, 300);
   }
-  ESP_LOGE(TAG, "SAM-BA version query failed after %u ms — device not in bootloader mode?", RETRY_MAX_MS);
+  ESP_LOGE(TAG, "SAM-BA version query failed after %" PRIu32 " ms — device not in bootloader mode?", RETRY_MAX_MS);
   return false;
 }
 
