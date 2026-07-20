@@ -127,20 +127,7 @@ void EmonTxUpdater::on_flash_firmware_(std::string url) {
   }
   // Wait ~500 ms for the firmware to print the confirmation prompt.
   // after — read and log what the emon32 responded with
-  {
-    uint8_t b;
-    std::string resp;
-    uint32_t deadline = millis() + 500;
-    while (millis() < deadline) {
-      if (this->emontx_->available() > 0 && this->emontx_->read_byte(&b))
-        resp += static_cast<char>(b);
-      else
-        delay(1);
-    }
-    ESP_LOGI(TAG, "emon32 response to 'e': [%s] (%zu bytes)", resp.c_str(), resp.size());
-    if (resp.empty())
-      ESP_LOGW(TAG, "  No response — 'e' command may not be recognised by this firmware");
-  }
+  delay(500);
 
   // Step 2: confirm with "y\r\n" — firmware writes the magic key
   //         (0xF01669EF → 0x20003FFC) and calls NVIC_SystemReset().
@@ -610,12 +597,32 @@ bool EmonTxUpdater::samba_init_() {
 
   // Verify via version command.
   std::string ver;
-  if (!this->samba_version_(ver)) {
-    ESP_LOGE(TAG, "SAM-BA version query failed — device not in bootloader mode?");
-    return false;
+  constexpr uint32_t RETRY_PERIOD_MS = 500;
+  constexpr uint32_t RETRY_MAX_MS = 10000;
+  for (uint32_t waited = 0; waited <= RETRY_MAX_MS; waited += RETRY_PERIOD_MS) {
+    this->uart_flush_rx_();
+    if (this->samba_version_(ver)) {
+      ESP_LOGD(TAG, "SAM-BA handshake OK after %u ms extra, version: %s", waited, ver.c_str());
+      return true;
+    }
+    ESP_LOGD(TAG, "SAM-BA not ready yet (waited %u ms)...", waited);
+    delay(RETRY_PERIOD_MS);
+    App.feed_wdt();
+    // Re-send auto-baud + N# on each retry so SAM-BA can lock on.
+    this->emontx_->write_byte(0x80);
+    delay(10);
+    this->emontx_->write_byte(0x80);
+    delay(10);
+    this->emontx_->write_byte('#');
+    delay(100);
+    uint8_t discard[4];
+    this->uart_read_bytes_(discard, 4, 200);
+    const uint8_t n_cmd[] = {'N', '#'};
+    this->uart_write_(n_cmd, sizeof(n_cmd));
+    this->uart_read_bytes_(discard, 2, 300);
   }
-  ESP_LOGD(TAG, "SAM-BA handshake OK, version: %s", ver.c_str());
-  return true;
+  ESP_LOGE(TAG, "SAM-BA version query failed after %u ms — device not in bootloader mode?", RETRY_MAX_MS);
+  return false;
 }
 
 bool EmonTxUpdater::samba_version_(std::string &ver_out) {
