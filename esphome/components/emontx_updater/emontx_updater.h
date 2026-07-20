@@ -124,7 +124,8 @@ class EmonTxUpdater : public Component, public api::CustomAPIDevice {
   /// Follow a single HTTP redirect (e.g. GitHub release → CDN) using a dedicated
   /// esp_http_client with a large buffer, bypassing http_request's fixed buffer.
   /// Returns the Location URL on a 3xx response, or the original URL otherwise.
-  std::string resolve_redirect_(const std::string &url);
+  //std::string resolve_redirect_(const std::string &url);
+  esp_http_client_handle_t* open_final_url_(const std::string &url);
 
   // ── Firmware validation (runs before bootloader entry) ───────────────────
   /// Sanity-check the downloaded binary without touching the SAMD21.

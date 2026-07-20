@@ -148,7 +148,7 @@ void EmonTxUpdater::on_flash_firmware_(std::string url) {
   //    alive (TWDT, API keepalive) and lets loop() dispatch status events to HA.
   this->flash_pending_firmware_ = std::move(firmware);
   this->flash_task_running_ = true;
-  BaseType_t rc = xTaskCreate(flash_task_fn_, "emontx_flash", 20480, this, 5, &this->flash_task_handle_);
+  BaseType_t rc = xTaskCreate(flash_task_fn_, "emontx_flash", 32768, this, 5, &this->flash_task_handle_);
   if (rc != pdPASS) {
     ESP_LOGE(TAG, "Failed to create flash task (err=%d) — aborting", static_cast<int>(rc));
     this->flash_pending_firmware_.clear();
@@ -191,6 +191,7 @@ void EmonTxUpdater::flash_task_fn_(void *param) {
 // Download phase
 // ═════════════════════════════════════════════════════════════════════════════
 
+/*
 std::string EmonTxUpdater::resolve_redirect_(const std::string &url) {
   // GitHub release URLs may chain through multiple redirects, each returning large
   // security headers (CSP, cookies, etc.) that exceed http_request's buffer.
@@ -255,6 +256,76 @@ std::string EmonTxUpdater::resolve_redirect_(const std::string &url) {
 
   return current;
 }
+*/
+
+// Returns an open client handle positioned at the 200 response body,
+// or nullptr on failure. Caller must esp_http_client_close/cleanup it.
+esp_http_client_handle_t EmonTxUpdater::open_final_url_(const std::string &url) {
+  struct Ctx {
+    std::string location;
+  } ctx;
+
+  auto location_handler = [](esp_http_client_event_t *evt) -> esp_err_t {
+    if (evt->event_id == HTTP_EVENT_ON_HEADER && strcasecmp(evt->header_key, "Location") == 0)
+      static_cast<Ctx *>(evt->user_data)->location = evt->header_value;
+    return ESP_OK;
+  };
+
+  std::string current = url;
+
+  for (int hop = 0; hop < 5; hop++) {
+    ctx.location.clear();
+
+    esp_http_client_config_t cfg = {};
+    cfg.url = current.c_str();
+    cfg.disable_auto_redirect = true;
+    cfg.buffer_size = 32768;
+    cfg.buffer_size_tx = 4096;
+    cfg.timeout_ms = 30000;
+    cfg.crt_bundle_attach = esp_crt_bundle_attach;
+    cfg.user_data = &ctx;
+    cfg.event_handler = location_handler;
+
+    esp_http_client_handle_t client = esp_http_client_init(&cfg);
+    if (!client) {
+      ESP_LOGW(TAG, "open_final_url_: init failed at hop %d", hop);
+      return nullptr;
+    }
+
+    esp_err_t err = esp_http_client_open(client, 0);
+    if (err != ESP_OK) {
+      ESP_LOGW(TAG, "open_final_url_ hop %d open failed: %s", hop, esp_err_to_name(err));
+      esp_http_client_cleanup(client);
+      return nullptr;
+    }
+
+    esp_http_client_fetch_headers(client);
+    int status = esp_http_client_get_status_code(client);
+    ESP_LOGD(TAG, "open_final_url_ hop %d: HTTP %d", hop, status);
+
+    if (status >= 300 && status < 400 && !ctx.location.empty()) {
+      ESP_LOGI(TAG, "  → %s", ctx.location.c_str());
+      esp_http_client_close(client);
+      esp_http_client_cleanup(client);
+      current = ctx.location;
+      continue;
+    }
+
+    if (status == 200) {
+      if (current != url)
+        ESP_LOGI(TAG, "Final download URL: %s", current.c_str());
+      return client;  // caller owns this handle
+    }
+
+    ESP_LOGE(TAG, "open_final_url_ hop %d: unexpected status %d", hop, status);
+    esp_http_client_close(client);
+    esp_http_client_cleanup(client);
+    return nullptr;
+  }
+
+  ESP_LOGE(TAG, "open_final_url_: too many redirects");
+  return nullptr;
+}
 
 /*
 bool EmonTxUpdater::download_firmware_(const std::string &url, std::vector<uint8_t> &out) {
@@ -296,43 +367,15 @@ bool EmonTxUpdater::download_firmware_(const std::string &url, std::vector<uint8
 */
 
 bool EmonTxUpdater::download_firmware_(const std::string &url, std::vector<uint8_t> &out) {
-  const std::string download_url = this->resolve_redirect_(url);
-  ESP_LOGI(TAG, "Downloading firmware from %s", download_url.c_str());
+  ESP_LOGI(TAG, "Flash request received for URL: %s", url.c_str());
 
-  // Use esp_http_client directly with a large buffer so that long redirect-target
-  // URLs (e.g. GitHub release asset URLs with SAS token query strings, ~700+ chars)
-  // don't overflow the ESP-IDF HTTP client's internal URL/header buffer.
-  esp_http_client_config_t cfg = {};
-  cfg.url = download_url.c_str();
-  cfg.disable_auto_redirect = true;
-  cfg.buffer_size = 4096;
-  cfg.buffer_size_tx = 4096;
-  cfg.timeout_ms = 30000;
-  cfg.crt_bundle_attach = esp_crt_bundle_attach;
-
-  esp_http_client_handle_t client = esp_http_client_init(&cfg);
+  esp_http_client_handle_t client = this->open_final_url_(url);
   if (!client) {
-    ESP_LOGE(TAG, "HTTP client init failed");
+    ESP_LOGE(TAG, "Failed to open firmware URL");
     return false;
   }
 
-  esp_err_t err = esp_http_client_open(client, 0);
-  if (err != ESP_OK) {
-    ESP_LOGE(TAG, "HTTP open failed: %s", esp_err_to_name(err));
-    esp_http_client_cleanup(client);
-    return false;
-  }
-
-  int64_t content_length = esp_http_client_fetch_headers(client);
-  int status = esp_http_client_get_status_code(client);
-
-  if (status != 200) {
-    ESP_LOGE(TAG, "HTTP GET failed (status %d)", status);
-    esp_http_client_close(client);
-    esp_http_client_cleanup(client);
-    return false;
-  }
-
+  int64_t content_length = esp_http_client_get_content_length(client);
   if (content_length <= 0) {
     ESP_LOGE(TAG, "Content-Length is 0 or missing");
     esp_http_client_close(client);
@@ -341,7 +384,6 @@ bool EmonTxUpdater::download_firmware_(const std::string &url, std::vector<uint8
   }
 
   const size_t total = static_cast<size_t>(content_length);
-  // Guard against absurdly large files (>256 KB) — SAMD21J17 has 128 KB flash.
   if (total > 256 * 1024u) {
     ESP_LOGE(TAG, "Firmware too large (%zu bytes)", total);
     esp_http_client_close(client);
