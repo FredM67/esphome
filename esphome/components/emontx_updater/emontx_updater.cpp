@@ -148,7 +148,7 @@ void EmonTxUpdater::on_flash_firmware_(std::string url) {
   //    alive (TWDT, API keepalive) and lets loop() dispatch status events to HA.
   this->flash_pending_firmware_ = std::move(firmware);
   this->flash_task_running_ = true;
-  BaseType_t rc = xTaskCreate(flash_task_fn_, "emontx_flash", 8192, this, 5, &this->flash_task_handle_);
+  BaseType_t rc = xTaskCreate(flash_task_fn_, "emontx_flash", 20480, this, 5, &this->flash_task_handle_);
   if (rc != pdPASS) {
     ESP_LOGE(TAG, "Failed to create flash task (err=%d) — aborting", static_cast<int>(rc));
     this->flash_pending_firmware_.clear();
@@ -305,7 +305,7 @@ bool EmonTxUpdater::download_firmware_(const std::string &url, std::vector<uint8
   esp_http_client_config_t cfg = {};
   cfg.url = download_url.c_str();
   cfg.disable_auto_redirect = true;
-  cfg.buffer_size = 32768;
+  cfg.buffer_size = 4096;
   cfg.buffer_size_tx = 4096;
   cfg.timeout_ms = 30000;
   cfg.crt_bundle_attach = esp_crt_bundle_attach;
