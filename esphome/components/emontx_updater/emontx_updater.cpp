@@ -597,32 +597,12 @@ bool EmonTxUpdater::samba_init_() {
 
   // Verify via version command.
   std::string ver;
-  constexpr uint32_t RETRY_PERIOD_MS = 500;
-  constexpr uint32_t RETRY_MAX_MS = 10000;
-  for (uint32_t waited = 0; waited <= RETRY_MAX_MS; waited += RETRY_PERIOD_MS) {
-    this->uart_flush_rx_();
-    if (this->samba_version_(ver)) {
-      ESP_LOGD(TAG, "SAM-BA handshake OK after %" PRIu32 " ms extra, version: %s", waited, ver.c_str());
-      return true;
-    }
-    ESP_LOGD(TAG, "SAM-BA not ready yet (waited %" PRIu32 " ms)...", waited);
-    delay(RETRY_PERIOD_MS);
-    App.feed_wdt();
-    // Re-send auto-baud + N# on each retry so SAM-BA can lock on.
-    this->emontx_->write_byte(0x80);
-    delay(10);
-    this->emontx_->write_byte(0x80);
-    delay(10);
-    this->emontx_->write_byte('#');
-    delay(100);
-    uint8_t discard[4];
-    this->uart_read_bytes_(discard, 4, 200);
-    const uint8_t n_cmd[] = {'N', '#'};
-    this->uart_write_(n_cmd, sizeof(n_cmd));
-    this->uart_read_bytes_(discard, 2, 300);
+  if (!this->samba_version_(ver)) {
+    ESP_LOGE(TAG, "SAM-BA version query failed — device not in bootloader mode?");
+    return false;
   }
-  ESP_LOGE(TAG, "SAM-BA version query failed after %" PRIu32 " ms — device not in bootloader mode?", RETRY_MAX_MS);
-  return false;
+  ESP_LOGD(TAG, "SAM-BA handshake OK, version: %s", ver.c_str());
+  return true;
 }
 
 bool EmonTxUpdater::samba_version_(std::string &ver_out) {
