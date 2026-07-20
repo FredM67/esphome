@@ -125,8 +125,23 @@ void EmonTxUpdater::on_flash_firmware_(std::string url) {
     const uint8_t cmd_e[] = {'e', '\r', '\n'};
     this->uart_write_(cmd_e, sizeof(cmd_e));
   }
-  // Wait ~200 ms for the firmware to print the confirmation prompt.
-  delay(500);
+  // Wait ~500 ms for the firmware to print the confirmation prompt.
+  // after — read and log what the emon32 responded with
+  {
+    uint8_t b;
+    std::string resp;
+    uint32_t deadline = millis() + 500;
+    while (millis() < deadline) {
+      if (this->emontx_->available() > 0 && this->emontx_->read_byte(&b))
+        resp += static_cast<char>(b);
+      else
+        delay(1);
+    }
+    ESP_LOGI(TAG, "emon32 response to 'e': [%s] (%zu bytes)", resp.c_str(), resp.size());
+    if (resp.empty())
+      ESP_LOGW(TAG, "  No response — 'e' command may not be recognised by this firmware");
+  }
+
   // Step 2: confirm with "y\r\n" — firmware writes the magic key
   //         (0xF01669EF → 0x20003FFC) and calls NVIC_SystemReset().
   ESP_LOGI(TAG, "Sending bootloader entry step 2 ('y')");
