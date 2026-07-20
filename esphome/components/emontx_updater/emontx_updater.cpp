@@ -126,7 +126,7 @@ void EmonTxUpdater::on_flash_firmware_(std::string url) {
     this->uart_write_(cmd_e, sizeof(cmd_e));
   }
   // Wait ~200 ms for the firmware to print the confirmation prompt.
-  delay(200);
+  delay(500);
   // Step 2: confirm with "y\r\n" — firmware writes the magic key
   //         (0xF01669EF → 0x20003FFC) and calls NVIC_SystemReset().
   ESP_LOGI(TAG, "Sending bootloader entry step 2 ('y')");
