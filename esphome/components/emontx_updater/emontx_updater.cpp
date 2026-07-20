@@ -721,7 +721,7 @@ bool EmonTxUpdater::nvm_write_page_(uint32_t page_idx, const uint8_t *data) {
   // 2. Fill the NVM page buffer using 16 SAM-BA 'W' 32-bit word writes.
   //    With MANW=1 the NVM controller captures writes into its page buffer
   //    without auto-programming.  (SAMD21 datasheet §22.8.7)
-  ESP_LOGV(TAG, "  page %u addr=0x%08X: filling page buffer", page_idx, page_byte_addr);
+  ESP_LOGV(TAG, "  page %" PRIu32 " addr=0x%08" PRIX32 ": filling page buffer", page_idx, page_byte_addr);
   for (size_t i = 0; i < SAMD21_PAGE_SIZE; i += 4) {
     const uint32_t word = static_cast<uint32_t>(data[i])
                         | (static_cast<uint32_t>(data[i + 1]) << 8)
