@@ -259,9 +259,12 @@ std::string EmonTxUpdater::resolve_redirect_(const std::string &url) {
 }
 */
 
-// Returns an open client handle positioned at the 200 response body,
-// or nullptr on failure. Caller must esp_http_client_close/cleanup it.
-esp_http_client_handle_t EmonTxUpdater::open_final_url_(const std::string &url) {
+// Follow redirects using a large buffer needed for GitHub's long CSP+Location headers.
+// Returns the final URL (after all 3xx hops), or empty string on error.
+// A separate small-buffer client is then opened in download_firmware_ for the body,
+// which avoids the ESP32-C3 pbuf/esf_buf_recycle recursive-mutex crash seen when a
+// 32 KB+ RX buffer is held during body streaming.
+std::string EmonTxUpdater::resolve_final_url_(const std::string &url) {
   struct Ctx {
     std::string location;
   } ctx;
@@ -280,34 +283,36 @@ esp_http_client_handle_t EmonTxUpdater::open_final_url_(const std::string &url) 
     esp_http_client_config_t cfg = {};
     cfg.url = current.c_str();
     cfg.disable_auto_redirect = true;
-    cfg.buffer_size = 32768;
+    cfg.buffer_size = 32768;  // large: GitHub response headers can be >4 KB
     cfg.buffer_size_tx = 4096;
-    cfg.timeout_ms = 30000;
+    cfg.timeout_ms = 10000;
     cfg.crt_bundle_attach = esp_crt_bundle_attach;
     cfg.user_data = &ctx;
     cfg.event_handler = location_handler;
 
     esp_http_client_handle_t client = esp_http_client_init(&cfg);
     if (!client) {
-      ESP_LOGW(TAG, "open_final_url_: init failed at hop %d", hop);
-      return nullptr;
+      ESP_LOGW(TAG, "resolve_final_url_: init failed at hop %d", hop);
+      return "";
     }
 
     esp_err_t err = esp_http_client_open(client, 0);
+    if (err == ESP_OK) {
+      esp_http_client_fetch_headers(client);
+    }
+    int status = (err == ESP_OK) ? esp_http_client_get_status_code(client) : -1;
+    esp_http_client_close(client);
+    esp_http_client_cleanup(client);
+
     if (err != ESP_OK) {
-      ESP_LOGW(TAG, "open_final_url_ hop %d open failed: %s", hop, esp_err_to_name(err));
-      esp_http_client_cleanup(client);
-      return nullptr;
+      ESP_LOGW(TAG, "resolve_final_url_ hop %d open failed: %s", hop, esp_err_to_name(err));
+      return "";
     }
 
-    esp_http_client_fetch_headers(client);
-    int status = esp_http_client_get_status_code(client);
-    ESP_LOGD(TAG, "open_final_url_ hop %d: HTTP %d", hop, status);
+    ESP_LOGD(TAG, "resolve_final_url_ hop %d: HTTP %d", hop, status);
 
     if (status >= 300 && status < 400 && !ctx.location.empty()) {
       ESP_LOGI(TAG, "  → %s", ctx.location.c_str());
-      esp_http_client_close(client);
-      esp_http_client_cleanup(client);
       current = ctx.location;
       continue;
     }
@@ -315,17 +320,15 @@ esp_http_client_handle_t EmonTxUpdater::open_final_url_(const std::string &url) 
     if (status == 200) {
       if (current != url)
         ESP_LOGI(TAG, "Final download URL: %s", current.c_str());
-      return client;  // caller owns this handle
+      return current;
     }
 
-    ESP_LOGE(TAG, "open_final_url_ hop %d: unexpected status %d", hop, status);
-    esp_http_client_close(client);
-    esp_http_client_cleanup(client);
-    return nullptr;
+    ESP_LOGE(TAG, "resolve_final_url_ hop %d: unexpected status %d", hop, status);
+    return "";
   }
 
-  ESP_LOGE(TAG, "open_final_url_: too many redirects");
-  return nullptr;
+  ESP_LOGE(TAG, "resolve_final_url_: too many redirects");
+  return "";
 }
 
 /*
@@ -368,15 +371,48 @@ bool EmonTxUpdater::download_firmware_(const std::string &url, std::vector<uint8
 */
 
 bool EmonTxUpdater::download_firmware_(const std::string &url, std::vector<uint8_t> &out) {
-  ESP_LOGI(TAG, "Flash request received for URL: %s", url.c_str());
+  ESP_LOGI(TAG, "Download request for URL: %s", url.c_str());
 
-  esp_http_client_handle_t client = this->open_final_url_(url);
-  if (!client) {
-    ESP_LOGE(TAG, "Failed to open firmware URL");
+  // Phase 1: resolve redirects with a large buffer (GitHub response headers are >4 KB).
+  // The client is closed after headers are read — only the final URL is kept.
+  const std::string final_url = this->resolve_final_url_(url);
+  if (final_url.empty()) {
+    ESP_LOGE(TAG, "Failed to resolve firmware URL");
     return false;
   }
 
-  int64_t content_length = esp_http_client_get_content_length(client);
+  // Phase 2: stream the body with a small buffer (4 KB) to avoid the ESP32-C3
+  // pbuf/esf_buf_recycle recursive-mutex crash that occurs when esp_http_client_read
+  // is called with a 32 KB+ buffer on the RISC-V lwip stack.
+  esp_http_client_config_t cfg = {};
+  cfg.url = final_url.c_str();
+  cfg.disable_auto_redirect = false;
+  cfg.buffer_size = 4096;
+  cfg.buffer_size_tx = 4096;
+  cfg.timeout_ms = 30000;
+  cfg.crt_bundle_attach = esp_crt_bundle_attach;
+
+  esp_http_client_handle_t client = esp_http_client_init(&cfg);
+  if (!client) {
+    ESP_LOGE(TAG, "HTTP client init failed");
+    return false;
+  }
+
+  esp_err_t err = esp_http_client_open(client, 0);
+  if (err != ESP_OK) {
+    ESP_LOGE(TAG, "HTTP open failed: %s", esp_err_to_name(err));
+    esp_http_client_cleanup(client);
+    return false;
+  }
+
+  int64_t content_length = esp_http_client_fetch_headers(client);
+  int status = esp_http_client_get_status_code(client);
+  if (status != 200) {
+    ESP_LOGE(TAG, "HTTP GET returned status %d", status);
+    esp_http_client_close(client);
+    esp_http_client_cleanup(client);
+    return false;
+  }
   if (content_length <= 0) {
     ESP_LOGE(TAG, "Content-Length is 0 or missing");
     esp_http_client_close(client);
@@ -406,6 +442,7 @@ bool EmonTxUpdater::download_firmware_(const std::string &url, std::vector<uint8
     if (len == 0)
       break;
     received += len;
+    App.feed_wdt();
   }
 
   esp_http_client_close(client);
@@ -416,6 +453,7 @@ bool EmonTxUpdater::download_firmware_(const std::string &url, std::vector<uint8
     out.clear();
     return false;
   }
+  ESP_LOGI(TAG, "Downloaded %zu bytes", received);
   return true;
 }
 
