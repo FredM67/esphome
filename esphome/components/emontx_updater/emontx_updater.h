@@ -122,11 +122,6 @@ class EmonTxUpdater : public Component, public api::CustomAPIDevice {
 
   // ── Download phase ───────────────────────────────────────────────────────
   bool download_firmware_(const std::string &url, std::vector<uint8_t> &out);
-  /// Follow redirects using a large buffer (needed for GitHub's long CSP+Location headers).
-  /// Returns the final URL (after all 3xx hops) or an empty string on error.
-  /// A separate small-buffer client is then opened for the body download to avoid
-  /// the ESP32-C3 pbuf/esf_buf_recycle recursive-mutex crash seen with large buffers.
-  std::string resolve_final_url_(const std::string &url);
 
   // ── Firmware validation (runs before bootloader entry) ───────────────────
   /// Sanity-check the downloaded binary without touching the SAMD21.
