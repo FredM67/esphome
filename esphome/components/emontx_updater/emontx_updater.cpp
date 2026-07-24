@@ -262,50 +262,91 @@ std::string EmonTxUpdater::resolve_redirect_(const std::string &url) {
 bool EmonTxUpdater::download_firmware_(const std::string &url, std::vector<uint8_t> &out) {
   ESP_LOGI(TAG, "Download request for URL: %s", url.c_str());
 
-  // Single client with auto-redirect and a 4 KB RX buffer.
-  // 4 KB is safe on ESP32-C3: avoids the esf_buf_recycle recursive-mutex crash
-  // that occurs with larger buffers (≥8 KB) during body streaming on the RISC-V
-  // lwip/Wi-Fi DMA path.  The github.com 302 redirect headers fit within 4 KB;
-  // the large CSP headers from githubusercontent.com arrive on the 200 response
-  // and are not buffered for header parsing.
-  // Using auto-redirect (not manual hop loop) keeps TLS handshake count to 2,
-  // which is important to avoid exhausting the main task stack during ECC ops.
-  esp_http_client_config_t cfg = {};
-  cfg.url = url.c_str();
-  cfg.disable_auto_redirect = false;
-  cfg.buffer_size = 4096;
-  cfg.buffer_size_tx = 4096;
-  cfg.timeout_ms = 30000;
-  cfg.crt_bundle_attach = esp_crt_bundle_attach;
+  // Manual redirect loop with disable_auto_redirect=true.
+  // esp_http_client auto-redirect only works with esp_http_client_perform(), not
+  // with the open/fetch_headers/read flow we need for streaming.
+  //
+  // Buffer is kept at 4 KB throughout — safe on ESP32-C3 (avoids the
+  // esf_buf_recycle recursive-mutex crash from ≥8 KB buffers during body
+  // streaming on the RISC-V lwip/Wi-Fi DMA path).
+  //
+  // On a 302 hop the client is closed and a new one opened for the redirect URL.
+  // On the 200 response the client is kept open to stream the body — this keeps
+  // the total TLS handshake count to 2 (github.com + githubusercontent.com) and
+  // avoids the main-task stack overflow that three consecutive ECDHE ops cause.
 
-  esp_http_client_handle_t client = esp_http_client_init(&cfg);
+  struct Ctx { std::string location; } ctx;
+  auto hdr_handler = [](esp_http_client_event_t *e) -> esp_err_t {
+    if (e->event_id == HTTP_EVENT_ON_HEADER && strcasecmp(e->header_key, "Location") == 0)
+      static_cast<Ctx *>(e->user_data)->location = e->header_value;
+    return ESP_OK;
+  };
+
+  std::string current = url;
+  esp_http_client_handle_t client = nullptr;
+
+  for (int hop = 0; hop < 5; hop++) {
+    ctx.location.clear();
+
+    esp_http_client_config_t cfg = {};
+    cfg.url            = current.c_str();
+    cfg.disable_auto_redirect = true;
+    cfg.buffer_size    = 4096;
+    cfg.buffer_size_tx = 4096;
+    cfg.timeout_ms     = 30000;
+    cfg.crt_bundle_attach = esp_crt_bundle_attach;
+    cfg.user_data      = &ctx;
+    cfg.event_handler  = hdr_handler;
+
+    client = esp_http_client_init(&cfg);
+    if (!client) {
+      ESP_LOGE(TAG, "HTTP client init failed at hop %d", hop);
+      return false;
+    }
+
+    esp_err_t err = esp_http_client_open(client, 0);
+    if (err != ESP_OK) {
+      ESP_LOGE(TAG, "HTTP open failed at hop %d: %s", hop, esp_err_to_name(err));
+      esp_http_client_cleanup(client);
+      return false;
+    }
+
+    int64_t content_length = esp_http_client_fetch_headers(client);
+    int status = esp_http_client_get_status_code(client);
+    ESP_LOGD(TAG, "download hop %d: HTTP %d", hop, status);
+
+    if (status >= 300 && status < 400 && !ctx.location.empty()) {
+      ESP_LOGI(TAG, "  → %s", ctx.location.c_str());
+      current = ctx.location;
+      esp_http_client_close(client);
+      esp_http_client_cleanup(client);
+      client = nullptr;
+      continue;
+    }
+
+    if (status != 200) {
+      ESP_LOGE(TAG, "HTTP GET returned status %d", status);
+      esp_http_client_close(client);
+      esp_http_client_cleanup(client);
+      return false;
+    }
+
+    // status == 200 — stream the body without closing the connection.
+    if (content_length <= 0) {
+      ESP_LOGE(TAG, "Content-Length is 0 or missing");
+      esp_http_client_close(client);
+      esp_http_client_cleanup(client);
+      return false;
+    }
+    break;  // fall through to body read below
+  }
+
   if (!client) {
-    ESP_LOGE(TAG, "HTTP client init failed");
+    ESP_LOGE(TAG, "Too many redirects");
     return false;
   }
 
-  esp_err_t err = esp_http_client_open(client, 0);
-  if (err != ESP_OK) {
-    ESP_LOGE(TAG, "HTTP open failed: %s", esp_err_to_name(err));
-    esp_http_client_cleanup(client);
-    return false;
-  }
-
-  int64_t content_length = esp_http_client_fetch_headers(client);
-  int status = esp_http_client_get_status_code(client);
-  if (status != 200) {
-    ESP_LOGE(TAG, "HTTP GET returned status %d", status);
-    esp_http_client_close(client);
-    esp_http_client_cleanup(client);
-    return false;
-  }
-  if (content_length <= 0) {
-    ESP_LOGE(TAG, "Content-Length is 0 or missing");
-    esp_http_client_close(client);
-    esp_http_client_cleanup(client);
-    return false;
-  }
-
+  int64_t content_length = esp_http_client_get_content_length(client);
   const size_t total = static_cast<size_t>(content_length);
   if (total > 256 * 1024u) {
     ESP_LOGE(TAG, "Firmware too large (%zu bytes)", total);
