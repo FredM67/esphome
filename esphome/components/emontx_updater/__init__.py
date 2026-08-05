@@ -18,6 +18,7 @@ CONF_EMONTX_ID = "emontx_id"
 CONF_HTTP_REQUEST_ID = "http_request_id"
 CONF_BOOTLOADER_TIMEOUT = "bootloader_timeout"
 CONF_DRY_RUN = "dry_run"
+CONF_VERIFY_SSL = "verify_ssl"
 
 CONFIG_SCHEMA = (
     cv.Schema(
@@ -27,6 +28,7 @@ CONFIG_SCHEMA = (
             cv.GenerateID(CONF_HTTP_REQUEST_ID): cv.use_id(HttpRequestComponent),
             cv.Optional(CONF_BOOTLOADER_TIMEOUT, default="5s"): cv.positive_time_period_milliseconds,
             cv.Optional(CONF_DRY_RUN, default=False): cv.boolean,
+            cv.Optional(CONF_VERIFY_SSL, default=True): cv.boolean,
         }
     ).extend(cv.COMPONENT_SCHEMA)
 )
@@ -60,3 +62,4 @@ async def to_code(config: ConfigType) -> None:
 
     cg.add(var.set_bootloader_timeout(config[CONF_BOOTLOADER_TIMEOUT]))
     cg.add(var.set_dry_run(config[CONF_DRY_RUN]))
+    cg.add(var.set_verify_ssl(config[CONF_VERIFY_SSL]))

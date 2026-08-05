@@ -95,6 +95,7 @@ class EmonTxUpdater : public Component, public api::CustomAPIDevice {
   void set_http_request(http_request::HttpRequestComponent *http) { this->http_ = http; }
   void set_bootloader_timeout(uint32_t ms) { this->bootloader_timeout_ms_ = ms; }
   void set_dry_run(bool dry_run) { this->dry_run_ = dry_run; }
+  void set_verify_ssl(bool verify) { this->verify_ssl_ = verify; }
 
   void setup() override;
   void loop() override;   ///< Drains status_queue_ and fires HA events (main-loop thread).
@@ -106,6 +107,7 @@ class EmonTxUpdater : public Component, public api::CustomAPIDevice {
   http_request::HttpRequestComponent *http_{nullptr};
   uint32_t bootloader_timeout_ms_{500};
   bool dry_run_{false};
+  bool verify_ssl_{true};
 
   // ── Background flash task ─────────────────────────────────────────────────
   /// Status events enqueued by the flash task; loop() dispatches them to HA.

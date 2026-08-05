@@ -294,7 +294,8 @@ bool EmonTxUpdater::download_firmware_(const std::string &url, std::vector<uint8
     cfg.buffer_size    = 4096;
     cfg.buffer_size_tx = 4096;
     cfg.timeout_ms     = 30000;
-    cfg.crt_bundle_attach = esp_crt_bundle_attach;
+    cfg.crt_bundle_attach = this->verify_ssl_ ? esp_crt_bundle_attach : nullptr;
+    cfg.skip_cert_common_name_check = !this->verify_ssl_;
     cfg.user_data      = &ctx;
     cfg.event_handler  = hdr_handler;
 
