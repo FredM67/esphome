@@ -7,6 +7,7 @@
 #include "esphome/core/application.h"
 #include "esphome/core/log.h"
 #include "esp_crt_bundle.h"
+#include "esp_heap_caps.h"
 
 namespace esphome::emontx_updater {
 
@@ -351,6 +352,18 @@ bool EmonTxUpdater::download_firmware_(const std::string &url, std::vector<uint8
   const size_t total = static_cast<size_t>(content_length);
   if (total > 256 * 1024u) {
     ESP_LOGE(TAG, "Firmware too large (%zu bytes)", total);
+    esp_http_client_close(client);
+    esp_http_client_cleanup(client);
+    return false;
+  }
+
+  // Guard against allocation failure: a failed std::vector allocation throws
+  // std::bad_alloc, and since C++ exceptions aren't usable in this build
+  // (ESP-IDF aborts on throw via __cxa_throw), an OOM here would crash the
+  // device instead of failing gracefully.
+  constexpr size_t HEAP_MARGIN = 16 * 1024u;
+  if (heap_caps_get_free_size(MALLOC_CAP_8BIT) < total + HEAP_MARGIN) {
+    ESP_LOGE(TAG, "Not enough free heap for %zu byte firmware download", total);
     esp_http_client_close(client);
     esp_http_client_cleanup(client);
     return false;
