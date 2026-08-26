@@ -17,7 +17,7 @@
 namespace esphome::emontx {
 
 /// Maximum line length in bytes (plus one byte reserved for null terminator)
-static constexpr size_t MAX_LINE_LENGTH = 4096;
+static constexpr size_t MAX_LINE_LENGTH = 1024;
 
 /**
  * @class EmonTx
