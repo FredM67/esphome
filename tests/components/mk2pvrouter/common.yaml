@@ -44,3 +44,15 @@ sensor:
     filters:
       # Device sends temperature * 100
       - multiply: 0.01
+
+text_sensor:
+  - platform: mk2pvrouter
+    name: S per MC
+    tag: S_MC
+    mk2pvrouter_id: test_mk2pvrouter
+
+  # Test another text tag
+  - platform: mk2pvrouter
+    name: Status
+    tag: STATUS
+    mk2pvrouter_id: test_mk2pvrouter
