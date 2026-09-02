@@ -44,3 +44,10 @@ sensor:
     filters:
       # Device sends temperature * 100
       - multiply: 0.01
+
+binary_sensor:
+  # Test relay as binary sensor
+  - platform: mk2pvrouter
+    name: Relay 2 Binary
+    tag: R2
+    mk2pvrouter_id: test_mk2pvrouter
