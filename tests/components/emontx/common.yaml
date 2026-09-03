@@ -1,3 +1,10 @@
+wifi:
+  ssid: MySSID
+  password: password1
+
+ota:
+  - platform: esphome
+
 button:
   - platform: template
     name: Send command test
@@ -8,6 +15,7 @@ button:
 
 emontx:
   id: test_emontx
+  unlock_delay: 2s
   on_json:
     - then:
         - logger.log: "Got JSON"
