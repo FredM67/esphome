@@ -14,10 +14,6 @@
 #include "esphome/components/sensor/sensor.h"
 #endif
 
-#ifdef USE_OTA_STATE_LISTENER
-#include "esphome/components/ota/ota_backend.h"
-#endif
-
 namespace esphome::emontx {
 
 /// Maximum line length in bytes (plus one byte reserved for null terminator)
@@ -30,17 +26,14 @@ static constexpr size_t MAX_LINE_LENGTH = 1024;
  * The EmonTx processes incoming data frames via UART,
  * extracts tags and values, and publishes them to registered sensors.
  */
-class EmonTx final : public Component,
-#ifdef USE_OTA_STATE_LISTENER
-                      public ota::OTAGlobalStateListener,
-#endif
-                      public uart::UARTDevice {
+class EmonTx final : public Component, public uart::UARTDevice {
  public:
-  EmonTx();
+  EmonTx() = default;
 
   void loop() override;
   void setup() override;
   void dump_config() override;
+  void on_shutdown() override;
 
   template<typename F> void add_on_json_callback(F &&callback) { this->json_callbacks_.add(std::forward<F>(callback)); }
 
@@ -54,14 +47,10 @@ class EmonTx final : public Component,
   void register_sensor(const char *tag_name, sensor::Sensor *sensor);
 #endif
 
-#ifdef USE_OTA_STATE_LISTENER
   // Delay after boot before sending 'emonunlock', to let any serial garbage from the
-  // reboot settle first. Setting this also locks the emonTx ('emonlock') right before
-  // the device reboots at the end of a successful OTA update.
+  // reboot settle first. Setting this also locks the emonTx ('emonlock') on shutdown,
+  // right before the device reboots (OTA, restart action, safe mode, ...).
   void set_unlock_delay(uint32_t unlock_delay) { this->unlock_delay_ = unlock_delay; }
-
-  void on_ota_global_state(ota::OTAState state, float progress, uint8_t error, ota::OTAComponent *component) override;
-#endif
 
  protected:
   void parse_json_(const char *data, size_t len);
@@ -73,9 +62,7 @@ class EmonTx final : public Component,
   LazyCallbackManager<void(StringRef)> data_callbacks_;
   uint16_t buffer_pos_{0};
   std::array<char, MAX_LINE_LENGTH + 1> buffer_{};
-#ifdef USE_OTA_STATE_LISTENER
   uint32_t unlock_delay_{0};
-#endif
 };
 
 // Action to send command to emonTx

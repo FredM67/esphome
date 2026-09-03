@@ -2,7 +2,7 @@ from dataclasses import dataclass, field
 
 from esphome import automation
 import esphome.codegen as cg
-from esphome.components import ota, uart
+from esphome.components import uart
 import esphome.config_validation as cv
 from esphome.const import (
     CONF_COMMAND,
@@ -131,11 +131,10 @@ async def to_code(config: ConfigType) -> None:
     await automation.build_callback_automations(var, config, _CALLBACK_AUTOMATIONS)
 
     # Guards against serial garbage during reboot being mistaken for a config command:
-    # locks the emonTx ('emonlock') right before a successful OTA reboots the device, and
-    # unlocks it ('emonunlock') this many ms after boot, once any reboot garbage has settled.
+    # locks the emonTx ('emonlock') right before the device reboots, and unlocks it
+    # ('emonunlock') this many ms after boot, once any reboot garbage has settled.
     if CONF_UNLOCK_DELAY in config:
         cg.add(var.set_unlock_delay(config[CONF_UNLOCK_DELAY]))
-        ota.request_ota_state_listeners()
 
 
 # Action: emontx.send_command

@@ -6,20 +6,12 @@ namespace esphome::emontx {
 
 static const char *const TAG = "emontx";
 
-EmonTx::EmonTx() {
-#ifdef USE_OTA_STATE_LISTENER
-  ota::get_global_ota_callback()->add_global_state_listener(this);
-#endif
-}
-
 void EmonTx::setup() {
   this->buffer_pos_ = 0;
 
-#ifdef USE_OTA_STATE_LISTENER
   if (this->unlock_delay_ > 0) {
     this->set_timeout(this->unlock_delay_, [this]() { this->send_command("emonunlock"); });
   }
-#endif
 }
 
 /**
@@ -127,16 +119,14 @@ void EmonTx::register_sensor(const char *tag_name, sensor::Sensor *sensor) {
 }
 #endif
 
-#ifdef USE_OTA_STATE_LISTENER
 /**
- * @brief Locks the emonTx right before the device reboots at the end of a successful OTA update,
- * so that serial garbage produced during the reboot cannot be mistaken for a configuration command.
+ * @brief Locks the emonTx right before the device reboots, so that serial garbage
+ * produced during the reboot cannot be mistaken for a configuration command.
  */
-void EmonTx::on_ota_global_state(ota::OTAState state, float progress, uint8_t error, ota::OTAComponent *component) {
-  if (state == ota::OTA_COMPLETED) {
+void EmonTx::on_shutdown() {
+  if (this->unlock_delay_ > 0) {
     this->send_command("emonlock");
   }
 }
-#endif
 
 }  // namespace esphome::emontx
