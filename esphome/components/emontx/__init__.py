@@ -29,6 +29,7 @@ EmonTxSendCommandAction = emontx_ns.class_("EmonTxSendCommandAction", automation
 CONF_EMONTX_ID = "emontx_id"
 CONF_TAG_NAME = "tag_name"
 CONF_ON_JSON = "on_json"
+CONF_UNLOCK_DELAY = "unlock_delay"
 
 DOMAIN = "emontx"
 
@@ -53,6 +54,7 @@ CONFIG_SCHEMA = (
             cv.GenerateID(): cv.declare_id(EmonTx),
             cv.Optional(CONF_ON_JSON): automation.validate_automation({}),
             cv.Optional(CONF_ON_DATA): automation.validate_automation({}),
+            cv.Optional(CONF_UNLOCK_DELAY): cv.positive_time_period_milliseconds,
         }
     )
     .extend(cv.COMPONENT_SCHEMA)
@@ -127,6 +129,12 @@ async def to_code(config: ConfigType) -> None:
     await cg.register_component(var, config)
     await uart.register_uart_device(var, config)
     await automation.build_callback_automations(var, config, _CALLBACK_AUTOMATIONS)
+
+    # Guards against serial garbage during reboot being mistaken for a config command:
+    # locks the emonTx ('emonlock') right before the device reboots, and unlocks it
+    # ('emonunlock') this many ms after boot, once any reboot garbage has settled.
+    if CONF_UNLOCK_DELAY in config:
+        cg.add(var.set_unlock_delay(config[CONF_UNLOCK_DELAY]))
 
 
 # Action: emontx.send_command

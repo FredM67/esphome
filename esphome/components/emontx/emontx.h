@@ -33,6 +33,7 @@ class EmonTx final : public Component, public uart::UARTDevice {
   void loop() override;
   void setup() override;
   void dump_config() override;
+  void on_shutdown() override;
 
   template<typename F> void add_on_json_callback(F &&callback) { this->json_callbacks_.add(std::forward<F>(callback)); }
 
@@ -55,6 +56,11 @@ class EmonTx final : public Component, public uart::UARTDevice {
   void register_sensor(const char *tag_name, sensor::Sensor *sensor);
 #endif
 
+  // Delay after boot before sending 'emonunlock', to let any serial garbage from the
+  // reboot settle first. Setting this also locks the emonTx ('emonlock') on shutdown,
+  // right before the device reboots (OTA, restart action, safe mode, ...).
+  void set_unlock_delay(uint32_t unlock_delay) { this->unlock_delay_ = unlock_delay; }
+
  protected:
   void parse_json_(const char *data, size_t len);
 
@@ -67,6 +73,7 @@ class EmonTx final : public Component, public uart::UARTDevice {
   LazyCallbackManager<void(StringRef)> data_callbacks_;
   uint16_t buffer_pos_{0};
   std::array<char, MAX_LINE_LENGTH + 1> buffer_{};
+  uint32_t unlock_delay_{0};
 };
 
 // Action to send command to emonTx

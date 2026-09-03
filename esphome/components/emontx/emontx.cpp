@@ -6,7 +6,13 @@ namespace esphome::emontx {
 
 static const char *const TAG = "emontx";
 
-void EmonTx::setup() { this->buffer_pos_ = 0; }
+void EmonTx::setup() {
+  this->buffer_pos_ = 0;
+
+  if (this->unlock_delay_ > 0) {
+    this->set_timeout(this->unlock_delay_, [this]() { this->send_command("emonunlock"); });
+  }
+}
 
 /**
  * @brief Implements the main loop for parsing data from the serial port.
@@ -116,5 +122,15 @@ void EmonTx::register_sensor(const char *tag_name, sensor::Sensor *sensor) {
   this->sensors_.emplace_back(tag_name, sensor);
 }
 #endif
+
+/**
+ * @brief Locks the emonTx right before the device reboots, so that serial garbage
+ * produced during the reboot cannot be mistaken for a configuration command.
+ */
+void EmonTx::on_shutdown() {
+  if (this->unlock_delay_ > 0) {
+    this->send_command("emonlock");
+  }
+}
 
 }  // namespace esphome::emontx
