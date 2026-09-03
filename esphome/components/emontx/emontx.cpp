@@ -10,7 +10,10 @@ void EmonTx::setup() {
   this->buffer_pos_ = 0;
 
   if (this->unlock_delay_ > 0) {
-    this->set_timeout(this->unlock_delay_, [this]() { this->send_command("emonunlock"); });
+    this->set_timeout(this->unlock_delay_, [this]() {
+      ESP_LOGI(TAG, "Unlocking emonTx after boot");
+      this->send_command("emonunlock");
+    });
   }
 }
 
@@ -129,6 +132,7 @@ void EmonTx::register_sensor(const char *tag_name, sensor::Sensor *sensor) {
  */
 void EmonTx::on_shutdown() {
   if (this->unlock_delay_ > 0) {
+    ESP_LOGI(TAG, "Locking emonTx before reboot");
     this->send_command("emonlock");
   }
 }
