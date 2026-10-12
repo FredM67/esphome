@@ -53,6 +53,7 @@ RESPONSE_ERROR_PARTITION_TABLE_UPDATE = 0x90
 RESPONSE_ERROR_BOOTLOADER_VERIFY = 0x91
 RESPONSE_ERROR_BOOTLOADER_UPDATE = 0x92
 RESPONSE_ERROR_VERSION_DOWNGRADE = 0x93
+RESPONSE_ERROR_UPDATE_BUSY = 0x95
 RESPONSE_ERROR_UNKNOWN = 0xFF
 
 OTA_VERSION_1_0 = 1
@@ -170,6 +171,10 @@ _ERROR_MESSAGES: dict[int, str] = {
         "The device rejected the update because it has OTA downgrade protection "
         "enabled: the new firmware's version must be newer than the version the "
         "device is currently running."
+    ),
+    RESPONSE_ERROR_UPDATE_BUSY: (
+        "The device is busy with another update that writes to its flash. "
+        "Wait for it to finish, then retry."
     ),
     RESPONSE_ERROR_UNKNOWN: "Unknown error from ESP",
 }

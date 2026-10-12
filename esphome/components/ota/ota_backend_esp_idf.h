@@ -26,6 +26,7 @@ class IDFOTABackend final {
   bool supports_compression() { return false; }
 
  protected:
+  UpdateLock lock_;
 #ifdef USE_OTA_PARTITIONS
   // copy_dest_part non-null means the running app must be copied INTO this slot of the current
   // table before the new partition table is committed. The destination is in the current table

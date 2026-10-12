@@ -18,6 +18,7 @@ class ArduinoRP2OTABackend final {
   bool supports_compression() { return false; }
 
  private:
+  UpdateLock lock_;
   bool md5_set_{false};
 };
 

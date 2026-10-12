@@ -16,6 +16,7 @@ class ArduinoLibreTinyOTABackend final {
   bool supports_compression() { return false; }
 
  private:
+  UpdateLock lock_;
   bool md5_set_{false};
 };
 
