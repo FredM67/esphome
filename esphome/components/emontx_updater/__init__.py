@@ -1,8 +1,8 @@
 import esphome.codegen as cg
-import esphome.config_validation as cv
-import esphome.final_validate as fv
 from esphome.components import emontx
+import esphome.config_validation as cv
 from esphome.const import CONF_ID
+import esphome.final_validate as fv
 from esphome.types import ConfigType
 
 DEPENDENCIES = ["esp32", "emontx", "http_request", "api"]
@@ -20,18 +20,18 @@ CONF_BOOTLOADER_TIMEOUT = "bootloader_timeout"
 CONF_DRY_RUN = "dry_run"
 CONF_VERIFY_SSL = "verify_ssl"
 
-CONFIG_SCHEMA = (
-    cv.Schema(
-        {
-            cv.GenerateID(): cv.declare_id(EmonTxUpdater),
-            cv.GenerateID(CONF_EMONTX_ID): cv.use_id(emontx.EmonTx),
-            cv.GenerateID(CONF_HTTP_REQUEST_ID): cv.use_id(HttpRequestComponent),
-            cv.Optional(CONF_BOOTLOADER_TIMEOUT, default="5s"): cv.positive_time_period_milliseconds,
-            cv.Optional(CONF_DRY_RUN, default=False): cv.boolean,
-            cv.Optional(CONF_VERIFY_SSL, default=True): cv.boolean,
-        }
-    ).extend(cv.COMPONENT_SCHEMA)
-)
+CONFIG_SCHEMA = cv.Schema(
+    {
+        cv.GenerateID(): cv.declare_id(EmonTxUpdater),
+        cv.GenerateID(CONF_EMONTX_ID): cv.use_id(emontx.EmonTx),
+        cv.GenerateID(CONF_HTTP_REQUEST_ID): cv.use_id(HttpRequestComponent),
+        cv.Optional(
+            CONF_BOOTLOADER_TIMEOUT, default="5s"
+        ): cv.positive_time_period_milliseconds,
+        cv.Optional(CONF_DRY_RUN, default=False): cv.boolean,
+        cv.Optional(CONF_VERIFY_SSL, default=True): cv.boolean,
+    }
+).extend(cv.COMPONENT_SCHEMA)
 
 
 def final_validate(config: ConfigType) -> ConfigType:
@@ -42,6 +42,11 @@ def final_validate(config: ConfigType) -> ConfigType:
         raise cv.Invalid(
             "emontx_updater requires 'custom_services: true' in the 'api:' section "
             "(needed to register the flash_emontx6 service in Home Assistant)."
+        )
+    if not api_config.get("homeassistant_services", False):
+        raise cv.Invalid(
+            "emontx_updater requires 'homeassistant_services: true' in the 'api:' section "
+            "(needed to send flash status events to Home Assistant)."
         )
 
     return config
