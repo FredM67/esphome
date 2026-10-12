@@ -4,6 +4,7 @@ wifi:
 
 api:
   custom_services: true
+  homeassistant_services: true
 
 http_request:
 
@@ -13,3 +14,6 @@ emontx:
 emontx_updater:
   emontx_id: test_emontx
   bootloader_timeout: 5s
+
+ota:
+  - platform: esphome

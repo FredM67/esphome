@@ -1,5 +1,6 @@
 #include "emontx_updater.h"
 
+#include <algorithm>
 #include <cinttypes>
 #include <cstdio>
 #include <cstring>
@@ -7,7 +8,8 @@
 #include "esphome/core/application.h"
 #include "esphome/core/log.h"
 #include "esp_crt_bundle.h"
-#include "esp_heap_caps.h"
+#include "esp_image_format.h"
+#include "esp_ota_ops.h"
 
 namespace esphome::emontx_updater {
 
@@ -67,12 +69,13 @@ void EmonTxUpdater::loop() {
   while (xQueueReceive(this->status_queue_, &payload, 0) == pdTRUE) {
     if (!this->is_connected())
       continue;
-    this->fire_homeassistant_event("esphome.emontx_flash_status", {
-                                                                      {"device_id", App.get_name().str()},
-                                                                      {"status", std::string(payload.status)},
-                                                                      {"progress", std::to_string(payload.progress)},
-                                                                      {"message", std::string(payload.message)},
-                                                                  });
+    this->fire_homeassistant_event("esphome.emontx_flash_status",
+                                   {
+                                       {"device_id", App.get_name().str()},
+                                       {"status", std::string(payload.status)},
+                                       {"progress", std::to_string(payload.progress)},  // NOLINT
+                                       {"message", std::string(payload.message)},
+                                   });
   }
 }
 
@@ -87,21 +90,29 @@ void EmonTxUpdater::on_flash_firmware_(std::string url) {
   }
 
   ESP_LOGI(TAG, "Flash request received for URL: %s", url.c_str());
+#ifdef USE_OTA
+  if (!this->update_lock_.try_acquire()) {
+    ESP_LOGW(TAG, "An ESPHome OTA update is in progress — ignoring flash request");
+    this->fire_flash_status_("failed", 0, "ESPHome OTA update in progress");
+    return;
+  }
+#endif
   this->fire_flash_status_("started", 0, "Downloading firmware");
 
-  // 1. Download firmware into ESP32 RAM (~60 KB).
-  std::vector<uint8_t> firmware;
-  if (!this->download_firmware_(url, firmware)) {
+  // 1. Download firmware into the spare OTA partition.
+  if (!this->download_firmware_(url)) {
+    this->release_update_lock_();
     ESP_LOGE(TAG, "Firmware download failed — aborting");
     this->fire_flash_status_("failed", 0, "Firmware download failed");
     return;
   }
-  ESP_LOGI(TAG, "Downloaded %zu bytes", firmware.size());
+  ESP_LOGI(TAG, "Downloaded %zu bytes", this->staged_size_);
   this->fire_flash_status_("flashing", 10, "Firmware downloaded, validating");
 
   // 2. Validate the binary before touching the SAMD21.
   //    This is the last safe abort point — after this we enter bootloader mode.
-  if (!this->validate_firmware_(firmware)) {
+  if (!this->validate_firmware_()) {
+    this->release_update_lock_();
     ESP_LOGE(TAG, "Firmware validation failed — aborting before bootloader entry");
     this->fire_flash_status_("failed", 0, "Firmware validation failed — device untouched");
     return;
@@ -110,6 +121,7 @@ void EmonTxUpdater::on_flash_firmware_(std::string url) {
 
   // DRY RUN: stop here without touching the SAMD21 (remove dry_run: true from YAML when done).
   if (this->dry_run_) {
+    this->release_update_lock_();
     ESP_LOGW(TAG, "DRY RUN — skipping bootloader entry and flash (dry_run: true in YAML)");
     this->fire_flash_status_("complete", 100, "Dry run complete — device was NOT touched");
     return;
@@ -128,7 +140,7 @@ void EmonTxUpdater::on_flash_firmware_(std::string url) {
   }
   // Wait ~500 ms for the firmware to print the confirmation prompt.
   // after — read and log what the emon32 responded with
-  delay(500);
+  delay(500);  // NOLINT
 
   // Step 2: confirm with "y\r\n" — firmware writes the magic key
   //         (0xF01669EF → 0x20003FFC) and calls NVIC_SystemReset().
@@ -141,20 +153,19 @@ void EmonTxUpdater::on_flash_firmware_(std::string url) {
            this->bootloader_timeout_ms_);
   // Feed the watchdog every 100 ms so the TWDT does not fire during this wait.
   for (uint32_t elapsed = 0; elapsed < this->bootloader_timeout_ms_; elapsed += 100) {
-    delay(100);
+    delay(100);  // NOLINT
     App.feed_wdt();
   }
 
   // 5. Hand firmware off to a FreeRTOS background task.
   //    do_flash_() blocks for ~60 s — running it in a task keeps the main loop
   //    alive (TWDT, API keepalive) and lets loop() dispatch status events to HA.
-  this->flash_pending_firmware_ = std::move(firmware);
   this->flash_task_running_ = true;
   BaseType_t rc = xTaskCreate(flash_task_fn_, "emontx_flash", 32768, this, 5, &this->flash_task_handle_);
   if (rc != pdPASS) {
     ESP_LOGE(TAG, "Failed to create flash task (err=%d) — aborting", static_cast<int>(rc));
-    this->flash_pending_firmware_.clear();
     this->flash_task_running_ = false;
+    this->release_update_lock_();
     this->emontx_->set_paused(false);
     this->fire_flash_status_("failed", 0, "Failed to start flash task");
   }
@@ -171,8 +182,8 @@ void EmonTxUpdater::on_flash_firmware_(std::string url) {
 void EmonTxUpdater::flash_task_fn_(void *param) {
   EmonTxUpdater *self = static_cast<EmonTxUpdater *>(param);
 
-  bool ok = self->do_flash_(self->flash_pending_firmware_);
-  self->flash_pending_firmware_.clear();
+  bool ok = self->do_flash_();
+  self->release_update_lock_();
 
   // Re-enable normal emonTx serial parsing.
   self->emontx_->set_paused(false);
@@ -187,6 +198,12 @@ void EmonTxUpdater::flash_task_fn_(void *param) {
 
   self->flash_task_running_ = false;  // signal loop() that no task is active
   vTaskDelete(nullptr);               // self-delete
+}
+
+void EmonTxUpdater::release_update_lock_() {
+#ifdef USE_OTA
+  this->update_lock_.release();
+#endif
 }
 
 // ═════════════════════════════════════════════════════════════════════════════
@@ -260,7 +277,7 @@ std::string EmonTxUpdater::resolve_redirect_(const std::string &url) {
 }
 */
 
-bool EmonTxUpdater::download_firmware_(const std::string &url, std::vector<uint8_t> &out) {
+bool EmonTxUpdater::download_firmware_(const std::string &url) {
   ESP_LOGI(TAG, "Download request for URL: %s", url.c_str());
 
   // Manual redirect loop with disable_auto_redirect=true.
@@ -276,7 +293,9 @@ bool EmonTxUpdater::download_firmware_(const std::string &url, std::vector<uint8
   // the total TLS handshake count to 2 (github.com + githubusercontent.com) and
   // avoids the main-task stack overflow that three consecutive ECDHE ops cause.
 
-  struct Ctx { std::string location; } ctx;
+  struct Ctx {
+    std::string location;
+  } ctx;
   auto hdr_handler = [](esp_http_client_event_t *e) -> esp_err_t {
     if (e->event_id == HTTP_EVENT_ON_HEADER && strcasecmp(e->header_key, "Location") == 0)
       static_cast<Ctx *>(e->user_data)->location = e->header_value;
@@ -290,15 +309,15 @@ bool EmonTxUpdater::download_firmware_(const std::string &url, std::vector<uint8
     ctx.location.clear();
 
     esp_http_client_config_t cfg = {};
-    cfg.url            = current.c_str();
+    cfg.url = current.c_str();
     cfg.disable_auto_redirect = true;
-    cfg.buffer_size    = 4096;
+    cfg.buffer_size = 4096;
     cfg.buffer_size_tx = 4096;
-    cfg.timeout_ms     = 30000;
+    cfg.timeout_ms = 30000;
     cfg.crt_bundle_attach = this->verify_ssl_ ? esp_crt_bundle_attach : nullptr;
     cfg.skip_cert_common_name_check = !this->verify_ssl_;
-    cfg.user_data      = &ctx;
-    cfg.event_handler  = hdr_handler;
+    cfg.user_data = &ctx;
+    cfg.event_handler = hdr_handler;
 
     client = esp_http_client_init(&cfg);
     if (!client) {
@@ -350,38 +369,70 @@ bool EmonTxUpdater::download_firmware_(const std::string &url, std::vector<uint8
 
   int64_t content_length = esp_http_client_get_content_length(client);
   const size_t total = static_cast<size_t>(content_length);
-  if (total > 256 * 1024u) {
-    ESP_LOGE(TAG, "Firmware too large (%zu bytes)", total);
+  if (total > FW_MAX_SIZE) {
+    ESP_LOGE(TAG, "Firmware too large (%zu bytes, max %zu)", total, FW_MAX_SIZE);
     esp_http_client_close(client);
     esp_http_client_cleanup(client);
     return false;
   }
 
-  // Guard against allocation failure: a failed std::vector allocation throws
-  // std::bad_alloc, and since C++ exceptions aren't usable in this build
-  // (ESP-IDF aborts on throw via __cxa_throw), an OOM here would crash the
-  // device instead of failing gracefully.
-  constexpr size_t HEAP_MARGIN = 16 * 1024u;
-  if (heap_caps_get_free_size(MALLOC_CAP_8BIT) < total + HEAP_MARGIN) {
-    ESP_LOGE(TAG, "Not enough free heap for %zu byte firmware download", total);
+  // Stage the image at the end of the spare OTA slot rather than in RAM: a 120 KB
+  // contiguous buffer is often unavailable on a fragmented heap. The previous app
+  // image at the start of the slot is left intact, so rollback still works.
+  const esp_partition_t *part = esp_ota_get_next_update_partition(nullptr);
+  if (part == nullptr) {
+    ESP_LOGE(TAG, "No spare OTA partition to stage the firmware");
     esp_http_client_close(client);
     esp_http_client_cleanup(client);
     return false;
   }
+  const size_t sector = part->erase_size;
+  size_t image_end = 0;
+  esp_image_metadata_t meta = {};
+  const esp_partition_pos_t pos = {.offset = part->address, .size = part->size};
+  App.feed_wdt();
+  if (esp_image_verify(ESP_IMAGE_VERIFY_SILENT, &pos, &meta) == ESP_OK)
+    image_end = meta.image_len;
+  const size_t offset = total <= part->size ? (part->size - total) / sector * sector : 0;
+  if (total > part->size || offset < image_end) {
+    ESP_LOGE(TAG, "Not enough room after the app image in partition '%s' (image %zu, slot %" PRIu32 " bytes)",
+             part->label, image_end, part->size);
+    esp_http_client_close(client);
+    esp_http_client_cleanup(client);
+    return false;
+  }
+  ESP_LOGI(TAG, "Staging firmware in partition '%s' at 0x%zx", part->label, offset);
 
-  out.resize(total);
-  size_t received = 0;
-  while (received < total) {
-    int len = esp_http_client_read(client, reinterpret_cast<char *>(out.data() + received), total - received);
-    if (len < 0) {
-      ESP_LOGE(TAG, "HTTP read error at byte %zu", received);
+  for (size_t off = offset; off < offset + total; off += sector) {
+    esp_err_t err = esp_partition_erase_range(part, off, sector);
+    if (err != ESP_OK) {
+      ESP_LOGE(TAG, "Partition erase failed at 0x%zx: %s", off, esp_err_to_name(err));
       esp_http_client_close(client);
       esp_http_client_cleanup(client);
-      out.clear();
       return false;
+    }
+    App.feed_wdt();
+  }
+
+  uint8_t buf[512];
+  size_t received = 0;
+  bool ok = true;
+  while (received < total) {
+    const size_t want = std::min(sizeof(buf), total - received);
+    int len = esp_http_client_read(client, reinterpret_cast<char *>(buf), want);
+    if (len < 0) {
+      ESP_LOGE(TAG, "HTTP read error at byte %zu", received);
+      ok = false;
+      break;
     }
     if (len == 0)
       break;
+    esp_err_t err = esp_partition_write(part, offset + received, buf, len);
+    if (err != ESP_OK) {
+      ESP_LOGE(TAG, "Partition write failed at byte %zu: %s", received, esp_err_to_name(err));
+      ok = false;
+      break;
+    }
     received += len;
     App.feed_wdt();
   }
@@ -389,12 +440,15 @@ bool EmonTxUpdater::download_firmware_(const std::string &url, std::vector<uint8
   esp_http_client_close(client);
   esp_http_client_cleanup(client);
 
+  if (!ok)
+    return false;
   if (received != total) {
     ESP_LOGE(TAG, "HTTP read incomplete: %zu / %zu bytes", received, total);
-    out.clear();
     return false;
   }
-  ESP_LOGI(TAG, "Downloaded %zu bytes", received);
+  this->staging_partition_ = part;
+  this->staging_offset_ = offset;
+  this->staged_size_ = total;
   return true;
 }
 
@@ -402,14 +456,12 @@ bool EmonTxUpdater::download_firmware_(const std::string &url, std::vector<uint8
 // Firmware validation
 // ═════════════════════════════════════════════════════════════════════════════
 
-bool EmonTxUpdater::validate_firmware_(const std::vector<uint8_t> &firmware) {
-  const size_t fw_size = firmware.size();
+bool EmonTxUpdater::validate_firmware_() {
+  const size_t fw_size = this->staged_size_;
 
   // ── Size bounds ───────────────────────────────────────────────────────────
   // Minimum: must be at least two vector table entries (8 bytes).
-  // Maximum: SAMD21J17 application area = 128 KB total - 8 KB bootloader = 120 KB.
   static constexpr size_t FW_MIN_SIZE = 8u;
-  static constexpr size_t FW_MAX_SIZE = 120u * 1024u;
 
   if (fw_size < FW_MIN_SIZE) {
     ESP_LOGE(TAG, "Firmware too small (%zu bytes)", fw_size);
@@ -425,6 +477,12 @@ bool EmonTxUpdater::validate_firmware_(const std::vector<uint8_t> &firmware) {
   //        (0x20000000 … 0x20004000, 16 KB).
   // [4..7] Reset vector — must be an odd address (Thumb bit set) within the
   //        application flash region (0x00002001 … 0x0001FFFF).
+  uint8_t firmware[8];
+  esp_err_t err = esp_partition_read(this->staging_partition_, this->staging_offset_, firmware, sizeof(firmware));
+  if (err != ESP_OK) {
+    ESP_LOGE(TAG, "Failed to read staged firmware: %s", esp_err_to_name(err));
+    return false;
+  }
   const uint32_t sp = (static_cast<uint32_t>(firmware[3]) << 24) | (static_cast<uint32_t>(firmware[2]) << 16) |
                       (static_cast<uint32_t>(firmware[1]) << 8) | static_cast<uint32_t>(firmware[0]);
 
@@ -459,8 +517,8 @@ bool EmonTxUpdater::validate_firmware_(const std::vector<uint8_t> &firmware) {
 // Top-level flash orchestration
 // ═════════════════════════════════════════════════════════════════════════════
 
-bool EmonTxUpdater::do_flash_(const std::vector<uint8_t> &firmware) {
-  const size_t fw_size = firmware.size();
+bool EmonTxUpdater::do_flash_() {
+  const size_t fw_size = this->staged_size_;
 
   // Compute number of complete + partial pages needed.
   const uint32_t pages_needed = (fw_size + SAMD21_PAGE_SIZE - 1) / SAMD21_PAGE_SIZE;
@@ -517,7 +575,11 @@ bool EmonTxUpdater::do_flash_(const std::vector<uint8_t> &firmware) {
     size_t offset = (size_t) page * SAMD21_PAGE_SIZE;
     size_t avail = (fw_size > offset) ? (fw_size - offset) : 0u;
     size_t copy_len = (avail < SAMD21_PAGE_SIZE) ? avail : SAMD21_PAGE_SIZE;
-    memcpy(page_data, firmware.data() + offset, copy_len);
+    esp_err_t err = esp_partition_read(this->staging_partition_, this->staging_offset_ + offset, page_data, copy_len);
+    if (err != ESP_OK) {
+      ESP_LOGE(TAG, "Failed to read staged firmware at byte %zu: %s", offset, esp_err_to_name(err));
+      return false;
+    }
     if (copy_len < SAMD21_PAGE_SIZE)
       memset(page_data + copy_len, 0xFF, SAMD21_PAGE_SIZE - copy_len);
 

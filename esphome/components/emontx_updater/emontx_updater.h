@@ -1,7 +1,6 @@
 #pragma once
 
 #include <string>
-#include <vector>
 
 #include "freertos/FreeRTOS.h"
 #include "freertos/queue.h"
@@ -11,47 +10,53 @@
 #include "esphome/components/api/custom_api_device.h"
 #include "esphome/components/emontx/emontx.h"
 #include "esphome/components/http_request/http_request.h"
+#ifdef USE_OTA
+#include "esphome/components/ota/ota_backend.h"
+#endif
 #include "esp_http_client.h"
+#include "esp_partition.h"
 
 namespace esphome::emontx_updater {
 
 // ─── ATSAMD21J17 device parameters (BOSSA Device.cpp: ATSAMD21x17) ────────
-static constexpr uint32_t SAMD21_APP_ADDR      = 0x00002000u; // first writable byte for application (after 8 KB bootloader)
-static constexpr uint32_t SAMD21_PAGES         = 2048u;
-static constexpr uint32_t SAMD21_PAGE_SIZE     = 64u;        // bytes per page
-static constexpr uint32_t SAMD21_PAGES_PER_ROW = 4u;         // pages per erase row
-static constexpr uint32_t SAMD21_ROW_SIZE      = 256u;       // bytes per erase row
+static constexpr uint32_t SAMD21_APP_ADDR = 0x00002000u;  // first writable byte for application (after 8 KB bootloader)
+static constexpr uint32_t SAMD21_PAGES = 2048u;
+static constexpr uint32_t SAMD21_PAGE_SIZE = 64u;     // bytes per page
+static constexpr uint32_t SAMD21_PAGES_PER_ROW = 4u;  // pages per erase row
+static constexpr uint32_t SAMD21_ROW_SIZE = 256u;     // bytes per erase row
+// Application area: 128 KB flash - 8 KB bootloader.
+static constexpr size_t FW_MAX_SIZE = 120u * 1024u;
 
 // ─── NVM controller register offsets from NVM_BASE (SAMD21 datasheet §22) ─
-static constexpr uint32_t NVM_BASE        = 0x41004000u;
-static constexpr uint8_t  NVM_REG_CTRLA  = 0x00u; // 16-bit command register
-static constexpr uint8_t  NVM_REG_CTRLB  = 0x04u; // 32-bit config (MANW, CACHEDIS)
-static constexpr uint8_t  NVM_REG_INTFLAG = 0x14u; // READY flag (bit 0)
-static constexpr uint8_t  NVM_REG_STATUS  = 0x18u; // 16-bit status / error bits
-static constexpr uint8_t  NVM_REG_ADDR    = 0x1Cu; // word address for next command
+static constexpr uint32_t NVM_BASE = 0x41004000u;
+static constexpr uint8_t NVM_REG_CTRLA = 0x00u;    // 16-bit command register
+static constexpr uint8_t NVM_REG_CTRLB = 0x04u;    // 32-bit config (MANW, CACHEDIS)
+static constexpr uint8_t NVM_REG_INTFLAG = 0x14u;  // READY flag (bit 0)
+static constexpr uint8_t NVM_REG_STATUS = 0x18u;   // 16-bit status / error bits
+static constexpr uint8_t NVM_REG_ADDR = 0x1Cu;     // word address for next command
 
-static constexpr uint32_t NVM_CMDEX_KEY      = 0xA500u; // key for all CTRLA commands
-static constexpr uint8_t  NVM_CMD_ER         = 0x02u;   // Erase Row
-static constexpr uint8_t  NVM_CMD_WP         = 0x04u;   // Write Page
-static constexpr uint8_t  NVM_CMD_PBC        = 0x44u;   // Page Buffer Clear
+static constexpr uint32_t NVM_CMDEX_KEY = 0xA500u;  // key for all CTRLA commands
+static constexpr uint8_t NVM_CMD_ER = 0x02u;        // Erase Row
+static constexpr uint8_t NVM_CMD_WP = 0x04u;        // Write Page
+static constexpr uint8_t NVM_CMD_PBC = 0x44u;       // Page Buffer Clear
 // W1C bits in STATUS: bit2=PROGE, bit3=LOCKE, bit4=NVME (writing 1 clears them).
-static constexpr uint32_t NVM_STATUS_ERR_MASK = 0x001Cu; // clear PROGE|LOCKE|NVME
-static constexpr uint32_t NVM_CTRLB_MANW_BIT  = (1u << 7);  // manual write enable
-static constexpr uint32_t NVM_CTRLB_CACHE_BIT = (1u << 18); // cache disable
+static constexpr uint32_t NVM_STATUS_ERR_MASK = 0x001Cu;     // clear PROGE|LOCKE|NVME
+static constexpr uint32_t NVM_CTRLB_MANW_BIT = (1u << 7);    // manual write enable
+static constexpr uint32_t NVM_CTRLB_CACHE_BIT = (1u << 18);  // cache disable
 
 // ─── ARM Cortex-M reset register (used for software reset after flashing) ─
-static constexpr uint32_t ARM_AIRCR_ADDR  = 0xE000ED0Cu;
+static constexpr uint32_t ARM_AIRCR_ADDR = 0xE000ED0Cu;
 static constexpr uint32_t ARM_AIRCR_RESET = 0x05FA0004u;
 
 // ─── SAM-BA / XModem constants ────────────────────────────────────────────
-static constexpr uint8_t XMODEM_SOH       = 0x01u;
-static constexpr uint8_t XMODEM_EOT       = 0x04u;
-static constexpr uint8_t XMODEM_ACK       = 0x06u;
-static constexpr uint8_t XMODEM_NAK       = 0x15u;
+static constexpr uint8_t XMODEM_SOH = 0x01u;
+static constexpr uint8_t XMODEM_EOT = 0x04u;
+static constexpr uint8_t XMODEM_ACK = 0x06u;
+static constexpr uint8_t XMODEM_NAK = 0x15u;
 static constexpr uint8_t XMODEM_CRC_START = 'C';
-static constexpr size_t  XMODEM_BLK_SIZE  = 128u;
-static constexpr size_t  XMODEM_FRAME_SZ  = 133u; // SOH(1)+blk(1)+~blk(1)+data(128)+CRC16(2)
-static constexpr int     XMODEM_MAX_RETRIES = 5;
+static constexpr size_t XMODEM_BLK_SIZE = 128u;
+static constexpr size_t XMODEM_FRAME_SZ = 133u;  // SOH(1)+blk(1)+~blk(1)+data(128)+CRC16(2)
+static constexpr int XMODEM_MAX_RETRIES = 5;
 
 // ─────────────────────────────────────────────────────────────────────────
 
@@ -59,7 +64,7 @@ static constexpr int     XMODEM_MAX_RETRIES = 5;
 // Fixed-size struct so xQueueSend/Receive copies by value without heap ops.
 struct FlashStatusPayload {
   char status[16];
-  int  progress;
+  int progress;
   char message[80];
 };
 
@@ -70,7 +75,7 @@ struct FlashStatusPayload {
  *
  * Flow:
  *   1. HA calls service  flash_emontx6(url=<firmware URL>)
- *   2. Component downloads the binary via http_request into ESP32 SRAM (~60 KB)
+ *   2. Component downloads the binary into the ESP32's spare OTA partition
  *   3. emonTx firmware is commanded into SAM-BA bootloader mode via 'e'/'y' sequence
  *   4. SAM-BA handshake (auto-baud, N#, V#)
  *   5. NVM CTRLB: disable cache, set MANW=1 (manual page write)
@@ -98,7 +103,7 @@ class EmonTxUpdater : public Component, public api::CustomAPIDevice {
   void set_verify_ssl(bool verify) { this->verify_ssl_ = verify; }
 
   void setup() override;
-  void loop() override;   ///< Drains status_queue_ and fires HA events (main-loop thread).
+  void loop() override;  ///< Drains status_queue_ and fires HA events (main-loop thread).
   void dump_config() override;
   float get_setup_priority() const override { return setup_priority::LATE; }
 
@@ -111,11 +116,18 @@ class EmonTxUpdater : public Component, public api::CustomAPIDevice {
 
   // ── Background flash task ─────────────────────────────────────────────────
   /// Status events enqueued by the flash task; loop() dispatches them to HA.
-  QueueHandle_t  status_queue_{nullptr};
-  TaskHandle_t   flash_task_handle_{nullptr};
-  volatile bool  flash_task_running_{false};
-  /// Firmware binary handed off to the background task.
-  std::vector<uint8_t> flash_pending_firmware_;
+  QueueHandle_t status_queue_{nullptr};
+  TaskHandle_t flash_task_handle_{nullptr};
+  volatile bool flash_task_running_{false};
+  /// Spare OTA partition holding the downloaded image at staging_offset_.
+  const esp_partition_t *staging_partition_{nullptr};
+  size_t staging_offset_{0};
+  size_t staged_size_{0};
+#ifdef USE_OTA
+  /// Held from download until the flash ends, so an ESPHome OTA can't overwrite the staged image.
+  ota::UpdateLock update_lock_;
+#endif
+  void release_update_lock_();
   /// Background task entry point (static, calls do_flash_ on this).
   static void flash_task_fn_(void *param);
 
@@ -123,15 +135,15 @@ class EmonTxUpdater : public Component, public api::CustomAPIDevice {
   void on_flash_firmware_(std::string url);  // NOLINT
 
   // ── Download phase ───────────────────────────────────────────────────────
-  bool download_firmware_(const std::string &url, std::vector<uint8_t> &out);
+  bool download_firmware_(const std::string &url);
 
   // ── Firmware validation (runs before bootloader entry) ───────────────────
   /// Sanity-check the downloaded binary without touching the SAMD21.
   /// Verifies size bounds and ARM Cortex-M vector table (SP + reset vector).
-  bool validate_firmware_(const std::vector<uint8_t> &firmware);
+  bool validate_firmware_();
 
   // ── Top-level flash orchestration (blocking) ─────────────────────────────
-  bool do_flash_(const std::vector<uint8_t> &firmware);
+  bool do_flash_();
 
   // ── SAM-BA protocol layer (maps 1:1 to BOSSA Samba.cpp) ─────────────────
   /// Full SAM-BA handshake: flush, auto-baud (0x80×2+'#'), N#, V#.
