@@ -2,13 +2,13 @@
 
 #include "esphome/core/component.h"
 #include "esphome/core/defines.h"
-#include "esphome/core/automation.h"
 #include "esphome/core/helpers.h"
 #include "esphome/core/string_ref.h"
 #include "esphome/components/uart/uart.h"
 #include "esphome/components/json/json_util.h"
 
 #include <array>
+#include <atomic>
 
 #ifdef USE_SENSOR
 #include "esphome/components/sensor/sensor.h"
@@ -40,31 +40,26 @@ class EmonTx final : public Component, public uart::UARTDevice {
   template<typename F> void add_on_data_callback(F &&callback) { this->data_callbacks_.add(std::forward<F>(callback)); }
 
   // Send command to emonTx via UART
-  void send_command(const std::string &command);
+  void send_command(const char *command);
+  void send_command(const std::string &command) { this->send_command(command.c_str()); }
 
-  /**
-   * Suspend or resume UART processing.
-   *
-   * When paused, loop() returns immediately without consuming any bytes from
-   * the UART buffer.  This is used by emontx_updater to take exclusive
-   * ownership of the shared UART during SAM-BA firmware flashing.
-   */
-  void set_paused(bool paused) { this->paused_ = paused; }
+  /// Stop reading the UART and sending commands, so another component can use it.
+  /// Atomic, so it can be called from any task. Hold the pause for at least one loop() pass.
+  void set_paused(bool paused) { this->paused_.store(paused, std::memory_order_relaxed); }
+
+  bool is_paused() const { return this->paused_.load(std::memory_order_relaxed); }
+
+  /// Lock the emonTx ('emonlock') before a reboot, so serial garbage during the reboot is not taken
+  /// as a command, and unlock it in setup(). Needs emonTx firmware v1.2.0 or later.
+  void set_lock_on_reboot(bool lock_on_reboot) { this->lock_on_reboot_ = lock_on_reboot; }
 
 #ifdef USE_SENSOR
   void init_sensors(size_t count) { this->sensors_.init(count); }
   void register_sensor(const char *tag_name, sensor::Sensor *sensor);
 #endif
 
-  // Delay after boot before sending 'emonunlock', to let any serial garbage from the
-  // reboot settle first. Setting this also locks the emonTx ('emonlock') on shutdown,
-  // right before the device reboots (OTA, restart action, safe mode, ...).
-  void set_unlock_delay(uint32_t unlock_delay) { this->unlock_delay_ = unlock_delay; }
-
  protected:
   void parse_json_(const char *data, size_t len);
-
-  volatile bool paused_{false};
 
 #ifdef USE_SENSOR
   FixedVector<std::pair<const char *, sensor::Sensor *>> sensors_{};
@@ -72,16 +67,11 @@ class EmonTx final : public Component, public uart::UARTDevice {
   LazyCallbackManager<void(JsonObject, StringRef)> json_callbacks_;
   LazyCallbackManager<void(StringRef)> data_callbacks_;
   uint16_t buffer_pos_{0};
+  std::atomic<bool> paused_{false};
+  bool was_paused_{false};
+  bool lock_on_reboot_{false};
+  bool discarding_line_{false};  // Set after an overflow or a pause until the end of that line
   std::array<char, MAX_LINE_LENGTH + 1> buffer_{};
-  uint32_t unlock_delay_{0};
-};
-
-// Action to send command to emonTx
-template<typename... Ts> class EmonTxSendCommandAction final : public Action<Ts...>, public Parented<EmonTx> {
- public:
-  TEMPLATABLE_VALUE(std::string, command)
-
-  void play(const Ts &...x) override { this->parent_->send_command(this->command_.value(x...)); }
 };
 
 }  // namespace esphome::emontx

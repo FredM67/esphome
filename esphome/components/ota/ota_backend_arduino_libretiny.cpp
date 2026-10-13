@@ -9,7 +9,7 @@
 
 namespace esphome::ota {
 
-static const char *const TAG = "ota";
+ESPHOME_LOG_TAG(TAG, "ota");
 
 std::unique_ptr<ArduinoLibreTinyOTABackend> make_ota_backend() { return make_unique<ArduinoLibreTinyOTABackend>(); }
 
@@ -59,6 +59,7 @@ OTAResponseTypes ArduinoLibreTinyOTABackend::end() {
   // Use strict validation (false) when MD5 is set, lenient validation (true) when no MD5
   // This matches the behavior of the old web_server OTA implementation
   if (Update.end(!this->md5_set_)) {
+    this->lock_.hold_until_reboot();
     return OTA_RESPONSE_OK;
   }
 
@@ -68,7 +69,11 @@ OTAResponseTypes ArduinoLibreTinyOTABackend::end() {
   return OTA_RESPONSE_ERROR_UPDATE_END;
 }
 
-void ArduinoLibreTinyOTABackend::abort() { Update.abort(); }
+void ArduinoLibreTinyOTABackend::abort() {
+  if (!this->lock_.is_held())  // refused in begin()
+    return;
+  Update.abort();
+}
 
 }  // namespace esphome::ota
 #endif  // USE_LIBRETINY

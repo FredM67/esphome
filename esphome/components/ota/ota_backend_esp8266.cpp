@@ -46,7 +46,7 @@ static constexpr size_t MIN_BUFFER_SIZE = 256;
 
 namespace esphome::ota {
 
-static const char *const TAG = "ota";
+ESPHOME_LOG_TAG(TAG, "ota");
 
 std::unique_ptr<ESP8266OTABackend> make_ota_backend() { return make_unique<ESP8266OTABackend>(); }
 
@@ -305,10 +305,13 @@ OTAResponseTypes ESP8266OTABackend::end() {
   this->buffer_.reset();
   esp8266::preferences_prevent_write(false);
 
+  this->lock_.hold_until_reboot();
   return OTA_RESPONSE_OK;
 }
 
 void ESP8266OTABackend::abort() {
+  if (!this->lock_.is_held())  // refused in begin()
+    return;
   this->buffer_.reset();
   this->buffer_len_ = 0;
   this->image_size_ = 0;
