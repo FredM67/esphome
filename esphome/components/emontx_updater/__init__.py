@@ -3,7 +3,6 @@ from esphome.components import emontx
 from esphome.components.api import CONF_CUSTOM_SERVICES, CONF_HOMEASSISTANT_SERVICES
 from esphome.components.const import CONF_VERIFY_SSL
 from esphome.components.emontx import CONF_EMONTX_ID
-from esphome.components.http_request import CONF_HTTP_REQUEST_ID, HttpRequestComponent
 import esphome.config_validation as cv
 from esphome.const import CONF_ID
 import esphome.final_validate as fv
@@ -23,7 +22,6 @@ CONFIG_SCHEMA = cv.Schema(
     {
         cv.GenerateID(): cv.declare_id(EmonTxUpdater),
         cv.GenerateID(CONF_EMONTX_ID): cv.use_id(emontx.EmonTx),
-        cv.GenerateID(CONF_HTTP_REQUEST_ID): cv.use_id(HttpRequestComponent),
         cv.Optional(
             CONF_BOOTLOADER_TIMEOUT, default="5s"
         ): cv.positive_time_period_milliseconds,

@@ -111,20 +111,6 @@ void EmonTxUpdater::on_flash_firmware_(std::string url) {  // NOLINT(performance
 
   // Stop the emontx parser from eating the SAM-BA replies
   this->emontx_->set_paused(true);
-
-  // emon32-fw asks to confirm 'e' with 'y', then writes the bootloader key and resets (src/configuration.c)
-  ESP_LOGI(TAG, "Sending bootloader entry step 1 ('e')");
-  this->uart_write_("e\r\n", 3);
-  delay(500);  // NOLINT
-  ESP_LOGI(TAG, "Sending bootloader entry step 2 ('y')");
-  this->uart_write_("y\r\n", 3);
-  ESP_LOGI(TAG, "Bootloader entry sent — waiting %" PRIu32 " ms for SAM-BA UART monitor to start",
-           this->bootloader_timeout_ms_);
-  for (uint32_t elapsed = 0; elapsed < this->bootloader_timeout_ms_; elapsed += 100) {
-    delay(100);  // NOLINT
-    App.feed_wdt();
-  }
-
   // The flash takes about 60 s; a task keeps the main loop and the API running meanwhile
   this->flash_task_running_ = true;
   if (xTaskCreate(flash_task_fn, "emontx_flash", 32768, this, 5, nullptr) != pdPASS) {
@@ -132,13 +118,14 @@ void EmonTxUpdater::on_flash_firmware_(std::string url) {  // NOLINT(performance
     this->flash_task_running_ = false;
     this->release_update_lock_();
     this->emontx_->set_paused(false);
-    this->fire_flash_status_("failed", 0, "Failed to start flash task");
+    this->fire_flash_status_("failed", 0, "Failed to start flash task — device untouched");
   }
 }
 
 void EmonTxUpdater::flash_task_fn(void *param) {
   auto *self = static_cast<EmonTxUpdater *>(param);
 
+  self->enter_bootloader_();
   bool ok = self->do_flash_();
   self->release_update_lock_();
   self->emontx_->set_paused(false);
@@ -352,6 +339,18 @@ bool EmonTxUpdater::validate_firmware_() {
   return true;
 }
 
+void EmonTxUpdater::enter_bootloader_() {
+  // emon32-fw asks to confirm 'e' with 'y', then writes the bootloader key and resets (src/configuration.c)
+  ESP_LOGI(TAG, "Sending bootloader entry step 1 ('e')");
+  this->uart_write_("e\r\n", 3);
+  delay(500);  // NOLINT
+  ESP_LOGI(TAG, "Sending bootloader entry step 2 ('y')");
+  this->uart_write_("y\r\n", 3);
+  ESP_LOGI(TAG, "Bootloader entry sent — waiting %" PRIu32 " ms for SAM-BA UART monitor to start",
+           this->bootloader_timeout_ms_);
+  delay(this->bootloader_timeout_ms_);  // NOLINT
+}
+
 bool EmonTxUpdater::do_flash_() {
   const size_t fw_size = this->staged_size_;
   const uint32_t pages_needed = (fw_size + SAMD21_PAGE_SIZE - 1) / SAMD21_PAGE_SIZE;
@@ -364,13 +363,9 @@ bool EmonTxUpdater::do_flash_() {
     ESP_LOGE(TAG, "SAM-BA init failed");
     return false;
   }
-  if (this->samba_version_(ver, sizeof(ver))) {
-    ESP_LOGI(TAG, "SAM-BA version: %s", ver);
-    snprintf(msg, sizeof(msg), "SAM-BA ready: %s", ver);
-    this->fire_flash_status_("flashing", 20, msg);
-  } else {
-    this->fire_flash_status_("flashing", 20, "SAM-BA ready");
-  }
+  ESP_LOGI(TAG, "SAM-BA version: %s", ver);
+  snprintf(msg, sizeof(msg), "SAM-BA ready: %s", ver);
+  this->fire_flash_status_("flashing", 20, msg);
 
   // Disable the NVM cache and enable manual page write, once for all pages
   uint32_t ctrlb = 0;
@@ -383,8 +378,6 @@ bool EmonTxUpdater::do_flash_() {
   this->fire_flash_status_("flashing", 25, "Writing flash pages");
   uint8_t page_data[SAMD21_PAGE_SIZE];
   for (uint32_t page = 0; page < pages_needed; page++) {
-    App.feed_wdt();
-
     if (page % SAMD21_PAGES_PER_ROW == 0) {
       uint32_t row_byte_addr = SAMD21_APP_ADDR + page * SAMD21_PAGE_SIZE;
       ESP_LOGD(TAG, "Erasing row %" PRIu32 " (addr 0x%08" PRIX32 ")", page / SAMD21_PAGES_PER_ROW, row_byte_addr);
@@ -491,7 +484,6 @@ bool EmonTxUpdater::nvm_wait_ready_(uint32_t timeout_ms) {
       return false;
     if (intflag & NVM_INTFLAG_READY)
       return true;
-    App.feed_wdt();
   }
   ESP_LOGE(TAG, "NVM not ready (timeout %" PRIu32 " ms)", timeout_ms);
   return false;
@@ -568,17 +560,12 @@ void EmonTxUpdater::uart_write_(const char *data, size_t len) {
 // Runs on the flash task only, so it can block
 bool EmonTxUpdater::uart_read_bytes_(uint8_t *buf, size_t len, uint32_t timeout_ms) {
   const uint32_t start = millis();
-  uint32_t wdt_tick = start;
   size_t read = 0;
   while (read < len && millis() - start < timeout_ms) {
     if (this->emontx_->available() > 0 && this->emontx_->read_byte(&buf[read])) {
       read++;
     } else {
       delay(1);  // NOLINT
-    }
-    if (millis() - wdt_tick >= 100) {
-      App.feed_wdt();
-      wdt_tick = millis();
     }
   }
   return read == len;

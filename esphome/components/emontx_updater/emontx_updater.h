@@ -86,6 +86,7 @@ class EmonTxUpdater : public Component, public api::CustomAPIDevice {
   bool stage_firmware_(esp_http_client_handle_t client, size_t total);
   /// Checks the size and the ARM vector table of the staged image, without touching the SAMD21.
   bool validate_firmware_();
+  void enter_bootloader_();
   bool do_flash_();
 
   /// Auto-baud, binary mode and version query. Fills ver_out with the version string.
