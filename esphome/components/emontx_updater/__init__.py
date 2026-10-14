@@ -1,5 +1,5 @@
 import esphome.codegen as cg
-from esphome.components import emontx
+from esphome.components import emontx, esp32
 from esphome.components.api import CONF_CUSTOM_SERVICES, CONF_HOMEASSISTANT_SERVICES
 from esphome.components.const import CONF_VERIFY_SSL
 from esphome.components.emontx import CONF_EMONTX_ID
@@ -56,3 +56,9 @@ async def to_code(config: ConfigType) -> None:
     cg.add(var.set_bootloader_timeout(config[CONF_BOOTLOADER_TIMEOUT]))
     cg.add(var.set_dry_run(config[CONF_DRY_RUN]))
     cg.add(var.set_verify_ssl(config[CONF_VERIFY_SSL]))
+    # The download uses esp_http_client directly, so it can't rely on http_request's TLS settings
+    esp32.request_http_client()
+    if config[CONF_VERIFY_SSL]:
+        esp32.require_certificate_bundle()
+    else:
+        esp32.allow_insecure_tls()
