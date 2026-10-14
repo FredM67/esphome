@@ -5,85 +5,70 @@
 #include <cstdio>
 #include <cstring>
 
+#include "freertos/task.h"
+
 #include "esphome/core/application.h"
+#include "esphome/core/hal.h"
+#include "esphome/core/helpers.h"
 #include "esphome/core/log.h"
 #include "esp_crt_bundle.h"
+#include "esp_http_client.h"
 #include "esp_image_format.h"
 #include "esp_ota_ops.h"
 
 namespace esphome::emontx_updater {
 
-static const char *const TAG = "emontx_updater";
+ESPHOME_LOG_TAG(TAG, "emontx_updater");
 
-// ─── CRC-16/CCITT lookup table (from BOSSA Samba.cpp, ShumaTech, BSD) ────
-static const uint16_t CRC16_TABLE[256] = {
-    0x0000, 0x1021, 0x2042, 0x3063, 0x4084, 0x50a5, 0x60c6, 0x70e7, 0x8108, 0x9129, 0xa14a, 0xb16b, 0xc18c, 0xd1ad,
-    0xe1ce, 0xf1ef, 0x1231, 0x0210, 0x3273, 0x2252, 0x52b5, 0x4294, 0x72f7, 0x62d6, 0x9339, 0x8318, 0xb37b, 0xa35a,
-    0xd3bd, 0xc39c, 0xf3ff, 0xe3de, 0x2462, 0x3443, 0x0420, 0x1401, 0x64e6, 0x74c7, 0x44a4, 0x5485, 0xa56a, 0xb54b,
-    0x8528, 0x9509, 0xe5ee, 0xf5cf, 0xc5ac, 0xd58d, 0x3653, 0x2672, 0x1611, 0x0630, 0x76d7, 0x66f6, 0x5695, 0x46b4,
-    0xb75b, 0xa77a, 0x9719, 0x8738, 0xf7df, 0xe7fe, 0xd79d, 0xc7bc, 0x48c4, 0x58e5, 0x6886, 0x78a7, 0x0840, 0x1861,
-    0x2802, 0x3823, 0xc9cc, 0xd9ed, 0xe98e, 0xf9af, 0x8948, 0x9969, 0xa90a, 0xb92b, 0x5af5, 0x4ad4, 0x7ab7, 0x6a96,
-    0x1a71, 0x0a50, 0x3a33, 0x2a12, 0xdbfd, 0xcbdc, 0xfbbf, 0xeb9e, 0x9b79, 0x8b58, 0xbb3b, 0xab1a, 0x6ca6, 0x7c87,
-    0x4ce4, 0x5cc5, 0x2c22, 0x3c03, 0x0c60, 0x1c41, 0xedae, 0xfd8f, 0xcdec, 0xddcd, 0xad2a, 0xbd0b, 0x8d68, 0x9d49,
-    0x7e97, 0x6eb6, 0x5ed5, 0x4ef4, 0x3e13, 0x2e32, 0x1e51, 0x0e70, 0xff9f, 0xefbe, 0xdfdd, 0xcffc, 0xbf1b, 0xaf3a,
-    0x9f59, 0x8f78, 0x9188, 0x81a9, 0xb1ca, 0xa1eb, 0xd10c, 0xc12d, 0xf14e, 0xe16f, 0x1080, 0x00a1, 0x30c2, 0x20e3,
-    0x5004, 0x4025, 0x7046, 0x6067, 0x83b9, 0x9398, 0xa3fb, 0xb3da, 0xc33d, 0xd31c, 0xe37f, 0xf35e, 0x02b1, 0x1290,
-    0x22f3, 0x32d2, 0x4235, 0x5214, 0x6277, 0x7256, 0xb5ea, 0xa5cb, 0x95a8, 0x8589, 0xf56e, 0xe54f, 0xd52c, 0xc50d,
-    0x34e2, 0x24c3, 0x14a0, 0x0481, 0x7466, 0x6447, 0x5424, 0x4405, 0xa7db, 0xb7fa, 0x8799, 0x97b8, 0xe75f, 0xf77e,
-    0xc71d, 0xd73c, 0x26d3, 0x36f2, 0x0691, 0x16b0, 0x6657, 0x7676, 0x4615, 0x5634, 0xd94c, 0xc96d, 0xf90e, 0xe92f,
-    0x99c8, 0x89e9, 0xb98a, 0xa9ab, 0x5844, 0x4865, 0x7806, 0x6827, 0x18c0, 0x08e1, 0x3882, 0x28a3, 0xcb7d, 0xdb5c,
-    0xeb3f, 0xfb1e, 0x8bf9, 0x9bd8, 0xabbb, 0xbb9a, 0x4a75, 0x5a54, 0x6a37, 0x7a16, 0x0af1, 0x1ad0, 0x2ab3, 0x3a92,
-    0xfd2e, 0xed0f, 0xdd6c, 0xcd4d, 0xbdaa, 0xad8b, 0x9de8, 0x8dc9, 0x7c26, 0x6c07, 0x5c64, 0x4c45, 0x3ca2, 0x2c83,
-    0x1ce0, 0x0cc1, 0xef1f, 0xff3e, 0xcf5d, 0xdf7c, 0xaf9b, 0xbfba, 0x8fd9, 0x9ff8, 0x6e17, 0x7e36, 0x4e55, 0x5e74,
-    0x2e93, 0x3eb2, 0x0ed1, 0x1ef0,
-};
+static constexpr int MAX_REDIRECTS = 5;
 
-// ═════════════════════════════════════════════════════════════════════════════
-// Component lifecycle
-// ═════════════════════════════════════════════════════════════════════════════
+static void close_client(esp_http_client_handle_t client) {
+  esp_http_client_close(client);
+  esp_http_client_cleanup(client);
+}
+
+static uint32_t read_le32(const uint8_t *buf) { return encode_uint32(buf[3], buf[2], buf[1], buf[0]); }
 
 void EmonTxUpdater::setup() {
   this->status_queue_ = xQueueCreate(32, sizeof(FlashStatusPayload));
-  if (this->status_queue_ == nullptr)
+  if (this->status_queue_ == nullptr) {
     ESP_LOGE(TAG, "Failed to create flash status queue — status events will be lost");
-  register_service(&EmonTxUpdater::on_flash_firmware_, "flash_emontx6", {"url"});
+  }
+  this->register_service(&EmonTxUpdater::on_flash_firmware_, "flash_emontx6", {"url"});
 }
 
 void EmonTxUpdater::dump_config() {
-  ESP_LOGCONFIG(TAG, "EmonTx Updater:");
-  ESP_LOGCONFIG(TAG, "  Bootloader timeout: %" PRIu32 " ms", this->bootloader_timeout_ms_);
-  if (this->dry_run_)
+  ESP_LOGCONFIG(TAG,
+                "EmonTx Updater:\n"
+                "  Bootloader timeout: %" PRIu32 " ms\n"
+                "  Verify SSL: %s",
+                this->bootloader_timeout_ms_, YESNO(this->verify_ssl_));
+  if (this->dry_run_) {
     ESP_LOGW(TAG, "  DRY RUN enabled — bootloader will NOT be entered");
-  ESP_LOGCONFIG(TAG, "  IMPORTANT: OTA flash requires the UART SAM-BA bootloader on the emonTx6.");
-  ESP_LOGCONFIG(TAG, "  If this is the first OTA flash, install it once via USB:");
-  ESP_LOGCONFIG(TAG, "  copy change-bootloader-uart.uf2 from the emon32-fw release onto the EMONBOOT drive.");
+  }
+  ESP_LOGCONFIG(TAG, "  IMPORTANT: OTA flash requires the UART SAM-BA bootloader on the emonTx6.\n"
+                     "  If this is the first OTA flash, install it once via USB:\n"
+                     "  copy change-bootloader-uart.uf2 from the emon32-fw release onto the EMONBOOT drive.");
 }
 
-// ─── Main-loop thread: drain the status queue and fire HA events ─────────────
-// The background flash task posts FlashStatusPayload items to status_queue_.
-// We dispatch them here, on the main-loop thread, where ESPHome API calls are safe.
+// Sends the events queued by fire_flash_status_() to Home Assistant, on the main loop where the API is safe
 void EmonTxUpdater::loop() {
-  if (this->status_queue_ == nullptr)
-    return;
   FlashStatusPayload payload;
-  while (xQueueReceive(this->status_queue_, &payload, 0) == pdTRUE) {
+  while (this->status_queue_ != nullptr && xQueueReceive(this->status_queue_, &payload, 0) == pdTRUE) {
     if (!this->is_connected())
       continue;
     this->fire_homeassistant_event("esphome.emontx_flash_status",
                                    {
                                        {"device_id", App.get_name().str()},
-                                       {"status", std::string(payload.status)},
+                                       {"status", payload.status},
                                        {"progress", std::to_string(payload.progress)},  // NOLINT
-                                       {"message", std::string(payload.message)},
+                                       {"message", payload.message},
                                    });
   }
+  this->disable_loop();
 }
 
-// ═════════════════════════════════════════════════════════════════════════════
-// HA service handler
-// ═════════════════════════════════════════════════════════════════════════════
-
-void EmonTxUpdater::on_flash_firmware_(std::string url) {
+void EmonTxUpdater::on_flash_firmware_(std::string url) {  // NOLINT(performance-unnecessary-value-param)
   if (this->flash_task_running_) {
     ESP_LOGW(TAG, "Flash already in progress — ignoring new request");
     return;
@@ -99,7 +84,6 @@ void EmonTxUpdater::on_flash_firmware_(std::string url) {
 #endif
   this->fire_flash_status_("started", 0, "Downloading firmware");
 
-  // 1. Download firmware into the spare OTA partition.
   if (!this->download_firmware_(url)) {
     this->release_update_lock_();
     ESP_LOGE(TAG, "Firmware download failed — aborting");
@@ -109,8 +93,7 @@ void EmonTxUpdater::on_flash_firmware_(std::string url) {
   ESP_LOGI(TAG, "Downloaded %zu bytes", this->staged_size_);
   this->fire_flash_status_("flashing", 10, "Firmware downloaded, validating");
 
-  // 2. Validate the binary before touching the SAMD21.
-  //    This is the last safe abort point — after this we enter bootloader mode.
+  // Last point where aborting leaves the emonTx untouched
   if (!this->validate_firmware_()) {
     this->release_update_lock_();
     ESP_LOGE(TAG, "Firmware validation failed — aborting before bootloader entry");
@@ -119,7 +102,6 @@ void EmonTxUpdater::on_flash_firmware_(std::string url) {
   }
   this->fire_flash_status_("flashing", 15, "Firmware valid, entering bootloader");
 
-  // DRY RUN: stop here without touching the SAMD21 (remove dry_run: true from YAML when done).
   if (this->dry_run_) {
     this->release_update_lock_();
     ESP_LOGW(TAG, "DRY RUN — skipping bootloader entry and flash (dry_run: true in YAML)");
@@ -127,65 +109,38 @@ void EmonTxUpdater::on_flash_firmware_(std::string url) {
     return;
   }
 
-  // 3. Pause the emontx parser so it does not consume SAM-BA response bytes.
+  // Stop the emontx parser from eating the SAM-BA replies
   this->emontx_->set_paused(true);
 
-  // 4. Enter SAM-BA bootloader mode via the emon32 firmware two-step command.
-  //    Source: emon32-fw src/configuration.c lines 853–862, 1195–1212.
-  //    Step 1: send "e\r\n" — firmware prints a confirmation prompt.
+  // emon32-fw asks to confirm 'e' with 'y', then writes the bootloader key and resets (src/configuration.c)
   ESP_LOGI(TAG, "Sending bootloader entry step 1 ('e')");
-  {
-    const uint8_t cmd_e[] = {'e', '\r', '\n'};
-    this->uart_write_(cmd_e, sizeof(cmd_e));
-  }
-  // Wait ~500 ms for the firmware to print the confirmation prompt.
-  // after — read and log what the emon32 responded with
+  this->uart_write_("e\r\n", 3);
   delay(500);  // NOLINT
-
-  // Step 2: confirm with "y\r\n" — firmware writes the magic key
-  //         (0xF01669EF → 0x20003FFC) and calls NVIC_SystemReset().
   ESP_LOGI(TAG, "Sending bootloader entry step 2 ('y')");
-  {
-    const uint8_t cmd_y[] = {'y', '\r', '\n'};
-    this->uart_write_(cmd_y, sizeof(cmd_y));
-  }
+  this->uart_write_("y\r\n", 3);
   ESP_LOGI(TAG, "Bootloader entry sent — waiting %" PRIu32 " ms for SAM-BA UART monitor to start",
            this->bootloader_timeout_ms_);
-  // Feed the watchdog every 100 ms so the TWDT does not fire during this wait.
   for (uint32_t elapsed = 0; elapsed < this->bootloader_timeout_ms_; elapsed += 100) {
     delay(100);  // NOLINT
     App.feed_wdt();
   }
 
-  // 5. Hand firmware off to a FreeRTOS background task.
-  //    do_flash_() blocks for ~60 s — running it in a task keeps the main loop
-  //    alive (TWDT, API keepalive) and lets loop() dispatch status events to HA.
+  // The flash takes about 60 s; a task keeps the main loop and the API running meanwhile
   this->flash_task_running_ = true;
-  BaseType_t rc = xTaskCreate(flash_task_fn_, "emontx_flash", 32768, this, 5, &this->flash_task_handle_);
-  if (rc != pdPASS) {
-    ESP_LOGE(TAG, "Failed to create flash task (err=%d) — aborting", static_cast<int>(rc));
+  if (xTaskCreate(flash_task_fn, "emontx_flash", 32768, this, 5, nullptr) != pdPASS) {
+    ESP_LOGE(TAG, "Failed to create flash task — aborting");
     this->flash_task_running_ = false;
     this->release_update_lock_();
     this->emontx_->set_paused(false);
     this->fire_flash_status_("failed", 0, "Failed to start flash task");
   }
-  // on_flash_firmware_ returns here; the task continues in the background.
 }
 
-// ═════════════════════════════════════════════════════════════════════════════
-// Background flash task
-// ═════════════════════════════════════════════════════════════════════════════
-
-// Runs on a FreeRTOS task (not the main loop).
-// Calls do_flash_(), resumes the emontx parser, posts the final status event,
-// then self-deletes.  The main loop's loop() dispatches the status events to HA.
-void EmonTxUpdater::flash_task_fn_(void *param) {
-  EmonTxUpdater *self = static_cast<EmonTxUpdater *>(param);
+void EmonTxUpdater::flash_task_fn(void *param) {
+  auto *self = static_cast<EmonTxUpdater *>(param);
 
   bool ok = self->do_flash_();
   self->release_update_lock_();
-
-  // Re-enable normal emonTx serial parsing.
   self->emontx_->set_paused(false);
 
   if (ok) {
@@ -196,8 +151,8 @@ void EmonTxUpdater::flash_task_fn_(void *param) {
     self->fire_flash_status_("failed", 0, "Firmware flash failed — check ESPHome logs");
   }
 
-  self->flash_task_running_ = false;  // signal loop() that no task is active
-  vTaskDelete(nullptr);               // self-delete
+  self->flash_task_running_ = false;
+  vTaskDelete(nullptr);
 }
 
 void EmonTxUpdater::release_update_lock_() {
@@ -206,93 +161,12 @@ void EmonTxUpdater::release_update_lock_() {
 #endif
 }
 
-// ═════════════════════════════════════════════════════════════════════════════
-// Download phase
-// ═════════════════════════════════════════════════════════════════════════════
-
-/*
-std::string EmonTxUpdater::resolve_redirect_(const std::string &url) {
-  // GitHub release URLs may chain through multiple redirects, each returning large
-  // security headers (CSP, cookies, etc.) that exceed http_request's buffer.
-  // Follow every hop using esp_http_client directly with a 32 KB buffer, fetching
-  // only headers (not the body) at each step, until we reach a non-3xx response.
-  // http_request then downloads from the final URL which has minimal headers.
-  struct Ctx {
-    std::string location;
-  } ctx;
-
-  auto location_handler = [](esp_http_client_event_t *evt) -> esp_err_t {
-    if (evt->event_id == HTTP_EVENT_ON_HEADER && strcasecmp(evt->header_key, "Location") == 0)
-      static_cast<Ctx *>(evt->user_data)->location = evt->header_value;
-    return ESP_OK;
-  };
-
-  std::string current = url;
-
-  for (int hop = 0; hop < 5; hop++) {
-    ctx.location.clear();
-
-    esp_http_client_config_t cfg = {};
-    cfg.url = current.c_str();
-    cfg.disable_auto_redirect = true;
-    cfg.buffer_size = 32768;
-    cfg.buffer_size_tx = 4096;
-    cfg.timeout_ms = 5000;
-    cfg.crt_bundle_attach = esp_crt_bundle_attach;
-    cfg.user_data = &ctx;
-    cfg.event_handler = location_handler;
-
-    esp_http_client_handle_t client = esp_http_client_init(&cfg);
-    if (!client) {
-      ESP_LOGW(TAG, "resolve_redirect_: init failed at hop %d", hop);
-      break;
-    }
-
-    bool redirect = false;
-    esp_err_t err = esp_http_client_open(client, 0);
-    if (err == ESP_OK) {
-      esp_http_client_fetch_headers(client);
-      int status = esp_http_client_get_status_code(client);
-      ESP_LOGD(TAG, "resolve_redirect_ hop %d: HTTP %d", hop, status);
-      if (status >= 300 && status < 400 && !ctx.location.empty()) {
-        current = ctx.location;
-        redirect = true;
-        ESP_LOGI(TAG, "  → %s", current.c_str());
-      }
-    } else {
-      ESP_LOGW(TAG, "resolve_redirect_ hop %d open failed: %s", hop, esp_err_to_name(err));
-    }
-
-    esp_http_client_close(client);
-    esp_http_client_cleanup(client);
-
-    if (!redirect)
-      break;
-  }
-
-  if (current != url)
-    ESP_LOGI(TAG, "Final download URL: %s", current.c_str());
-
-  return current;
-}
-*/
-
 bool EmonTxUpdater::download_firmware_(const std::string &url) {
   ESP_LOGI(TAG, "Download request for URL: %s", url.c_str());
 
-  // Manual redirect loop with disable_auto_redirect=true.
-  // esp_http_client auto-redirect only works with esp_http_client_perform(), not
-  // with the open/fetch_headers/read flow we need for streaming.
-  //
-  // Buffer is kept at 4 KB throughout — safe on ESP32-C3 (avoids the
-  // esf_buf_recycle recursive-mutex crash from ≥8 KB buffers during body
-  // streaming on the RISC-V lwip/Wi-Fi DMA path).
-  //
-  // On a 302 hop the client is closed and a new one opened for the redirect URL.
-  // On the 200 response the client is kept open to stream the body — this keeps
-  // the total TLS handshake count to 2 (github.com + githubusercontent.com) and
-  // avoids the main-task stack overflow that three consecutive ECDHE ops cause.
-
+  // Redirects are followed by hand: auto-redirect only works with esp_http_client_perform(), not with
+  // the open/read streaming used here. Keeping the 200 connection open limits the TLS handshakes to two,
+  // which the main task stack can afford. Buffers stay at 4 KB: 8 KB or more crash the ESP32-C3 Wi-Fi driver.
   struct Ctx {
     std::string location;
   } ctx;
@@ -304,8 +178,9 @@ bool EmonTxUpdater::download_firmware_(const std::string &url) {
 
   std::string current = url;
   esp_http_client_handle_t client = nullptr;
+  int64_t content_length = 0;
 
-  for (int hop = 0; hop < 5; hop++) {
+  for (int hop = 0; hop < MAX_REDIRECTS && client == nullptr; hop++) {
     ctx.location.clear();
 
     esp_http_client_config_t cfg = {};
@@ -319,71 +194,61 @@ bool EmonTxUpdater::download_firmware_(const std::string &url) {
     cfg.user_data = &ctx;
     cfg.event_handler = hdr_handler;
 
-    client = esp_http_client_init(&cfg);
-    if (!client) {
+    esp_http_client_handle_t hop_client = esp_http_client_init(&cfg);
+    if (hop_client == nullptr) {
       ESP_LOGE(TAG, "HTTP client init failed at hop %d", hop);
       return false;
     }
-
-    esp_err_t err = esp_http_client_open(client, 0);
+    esp_err_t err = esp_http_client_open(hop_client, 0);
     if (err != ESP_OK) {
       ESP_LOGE(TAG, "HTTP open failed at hop %d: %s", hop, esp_err_to_name(err));
-      esp_http_client_cleanup(client);
+      esp_http_client_cleanup(hop_client);
       return false;
     }
 
-    int64_t content_length = esp_http_client_fetch_headers(client);
-    int status = esp_http_client_get_status_code(client);
+    content_length = esp_http_client_fetch_headers(hop_client);
+    int status = esp_http_client_get_status_code(hop_client);
     ESP_LOGD(TAG, "download hop %d: HTTP %d", hop, status);
 
     if (status >= 300 && status < 400 && !ctx.location.empty()) {
       ESP_LOGI(TAG, "  → %s", ctx.location.c_str());
       current = ctx.location;
-      esp_http_client_close(client);
-      esp_http_client_cleanup(client);
-      client = nullptr;
+      close_client(hop_client);
       continue;
     }
-
     if (status != 200) {
       ESP_LOGE(TAG, "HTTP GET returned status %d", status);
-      esp_http_client_close(client);
-      esp_http_client_cleanup(client);
+      close_client(hop_client);
       return false;
     }
-
-    // status == 200 — stream the body without closing the connection.
-    if (content_length <= 0) {
-      ESP_LOGE(TAG, "Content-Length is 0 or missing");
-      esp_http_client_close(client);
-      esp_http_client_cleanup(client);
-      return false;
-    }
-    break;  // fall through to body read below
+    client = hop_client;
   }
 
-  if (!client) {
+  if (client == nullptr) {
     ESP_LOGE(TAG, "Too many redirects");
     return false;
   }
+  if (content_length <= 0) {
+    ESP_LOGE(TAG, "Content-Length is 0 or missing");
+    close_client(client);
+    return false;
+  }
+  bool ok = this->stage_firmware_(client, static_cast<size_t>(content_length));
+  close_client(client);
+  return ok;
+}
 
-  int64_t content_length = esp_http_client_get_content_length(client);
-  const size_t total = static_cast<size_t>(content_length);
+bool EmonTxUpdater::stage_firmware_(esp_http_client_handle_t client, size_t total) {
   if (total > FW_MAX_SIZE) {
     ESP_LOGE(TAG, "Firmware too large (%zu bytes, max %zu)", total, FW_MAX_SIZE);
-    esp_http_client_close(client);
-    esp_http_client_cleanup(client);
     return false;
   }
 
-  // Stage the image at the end of the spare OTA slot rather than in RAM: a 120 KB
-  // contiguous buffer is often unavailable on a fragmented heap. The previous app
-  // image at the start of the slot is left intact, so rollback still works.
+  // Stage the image at the end of the spare OTA slot rather than in RAM: a 120 KB contiguous
+  // buffer is often unavailable on a fragmented heap. The app image at the start stays for rollback.
   const esp_partition_t *part = esp_ota_get_next_update_partition(nullptr);
   if (part == nullptr) {
     ESP_LOGE(TAG, "No spare OTA partition to stage the firmware");
-    esp_http_client_close(client);
-    esp_http_client_cleanup(client);
     return false;
   }
   const size_t sector = part->erase_size;
@@ -397,8 +262,6 @@ bool EmonTxUpdater::download_firmware_(const std::string &url) {
   if (total > part->size || offset < image_end) {
     ESP_LOGE(TAG, "Not enough room after the app image in partition '%s' (image %zu, slot %" PRIu32 " bytes)",
              part->label, image_end, part->size);
-    esp_http_client_close(client);
-    esp_http_client_cleanup(client);
     return false;
   }
   ESP_LOGI(TAG, "Staging firmware in partition '%s' at 0x%zx", part->label, offset);
@@ -407,8 +270,6 @@ bool EmonTxUpdater::download_firmware_(const std::string &url) {
     esp_err_t err = esp_partition_erase_range(part, off, sector);
     if (err != ESP_OK) {
       ESP_LOGE(TAG, "Partition erase failed at 0x%zx: %s", off, esp_err_to_name(err));
-      esp_http_client_close(client);
-      esp_http_client_cleanup(client);
       return false;
     }
     App.feed_wdt();
@@ -416,52 +277,41 @@ bool EmonTxUpdater::download_firmware_(const std::string &url) {
 
   uint8_t buf[512];
   size_t received = 0;
-  bool ok = true;
   while (received < total) {
     const size_t want = std::min(sizeof(buf), total - received);
     int len = esp_http_client_read(client, reinterpret_cast<char *>(buf), want);
     if (len < 0) {
       ESP_LOGE(TAG, "HTTP read error at byte %zu", received);
-      ok = false;
-      break;
+      return false;
     }
     if (len == 0)
       break;
     esp_err_t err = esp_partition_write(part, offset + received, buf, len);
     if (err != ESP_OK) {
       ESP_LOGE(TAG, "Partition write failed at byte %zu: %s", received, esp_err_to_name(err));
-      ok = false;
-      break;
+      return false;
     }
     received += len;
     App.feed_wdt();
   }
-
-  esp_http_client_close(client);
-  esp_http_client_cleanup(client);
-
-  if (!ok)
-    return false;
   if (received != total) {
     ESP_LOGE(TAG, "HTTP read incomplete: %zu / %zu bytes", received, total);
     return false;
   }
+
   this->staging_partition_ = part;
   this->staging_offset_ = offset;
   this->staged_size_ = total;
   return true;
 }
 
-// ═════════════════════════════════════════════════════════════════════════════
-// Firmware validation
-// ═════════════════════════════════════════════════════════════════════════════
-
 bool EmonTxUpdater::validate_firmware_() {
   const size_t fw_size = this->staged_size_;
-
-  // ── Size bounds ───────────────────────────────────────────────────────────
-  // Minimum: must be at least two vector table entries (8 bytes).
+  // At least the stack pointer and reset vector of the vector table
   static constexpr size_t FW_MIN_SIZE = 8u;
+  static constexpr uint32_t SRAM_BASE = 0x20000000u;
+  static constexpr uint32_t SRAM_TOP = 0x20004000u;  // 16 KB
+  static constexpr uint32_t APP_END = 0x00020000u;   // 128 KB flash
 
   if (fw_size < FW_MIN_SIZE) {
     ESP_LOGE(TAG, "Firmware too small (%zu bytes)", fw_size);
@@ -472,26 +322,15 @@ bool EmonTxUpdater::validate_firmware_() {
     return false;
   }
 
-  // ── ARM Cortex-M0+ vector table (first 8 bytes of the .bin) ──────────────
-  // [0..3] Initial stack pointer — must point into SAMD21J17 SRAM
-  //        (0x20000000 … 0x20004000, 16 KB).
-  // [4..7] Reset vector — must be an odd address (Thumb bit set) within the
-  //        application flash region (0x00002001 … 0x0001FFFF).
-  uint8_t firmware[8];
-  esp_err_t err = esp_partition_read(this->staging_partition_, this->staging_offset_, firmware, sizeof(firmware));
+  uint8_t vectors[FW_MIN_SIZE];
+  esp_err_t err = esp_partition_read(this->staging_partition_, this->staging_offset_, vectors, sizeof(vectors));
   if (err != ESP_OK) {
     ESP_LOGE(TAG, "Failed to read staged firmware: %s", esp_err_to_name(err));
     return false;
   }
-  const uint32_t sp = (static_cast<uint32_t>(firmware[3]) << 24) | (static_cast<uint32_t>(firmware[2]) << 16) |
-                      (static_cast<uint32_t>(firmware[1]) << 8) | static_cast<uint32_t>(firmware[0]);
-
-  const uint32_t reset_vec = (static_cast<uint32_t>(firmware[7]) << 24) | (static_cast<uint32_t>(firmware[6]) << 16) |
-                             (static_cast<uint32_t>(firmware[5]) << 8) | static_cast<uint32_t>(firmware[4]);
-
-  static constexpr uint32_t SRAM_BASE = 0x20000000u;
-  static constexpr uint32_t SRAM_TOP = 0x20004000u;  // 16 KB
-  static constexpr uint32_t APP_END = 0x00020000u;   // 128 KB flash top
+  const uint32_t sp = read_le32(vectors);
+  const uint32_t reset_vec = read_le32(vectors + 4);
+  const uint32_t reset_addr = reset_vec & ~0x1u;
 
   if (sp < SRAM_BASE || sp > SRAM_TOP) {
     ESP_LOGE(TAG, "Invalid vector table: SP=0x%08" PRIX32 " is outside SRAM (0x%08" PRIX32 "–0x%08" PRIX32 ")", sp,
@@ -502,7 +341,7 @@ bool EmonTxUpdater::validate_firmware_() {
     ESP_LOGE(TAG, "Invalid vector table: reset vector 0x%08" PRIX32 " has no Thumb bit", reset_vec);
     return false;
   }
-  if ((reset_vec & ~0x1u) < SAMD21_APP_ADDR || (reset_vec & ~0x1u) >= APP_END) {
+  if (reset_addr < SAMD21_APP_ADDR || reset_addr >= APP_END) {
     ESP_LOGE(TAG,
              "Invalid vector table: reset vector 0x%08" PRIX32 " outside app flash (0x%08" PRIX32 "–0x%08" PRIX32 ")",
              reset_vec, SAMD21_APP_ADDR, APP_END);
@@ -513,55 +352,39 @@ bool EmonTxUpdater::validate_firmware_() {
   return true;
 }
 
-// ═════════════════════════════════════════════════════════════════════════════
-// Top-level flash orchestration
-// ═════════════════════════════════════════════════════════════════════════════
-
 bool EmonTxUpdater::do_flash_() {
   const size_t fw_size = this->staged_size_;
-
-  // Compute number of complete + partial pages needed.
   const uint32_t pages_needed = (fw_size + SAMD21_PAGE_SIZE - 1) / SAMD21_PAGE_SIZE;
   ESP_LOGI(TAG, "Flashing %zu bytes → %" PRIu32 " pages (%" PRIu32 " rows)", fw_size, pages_needed,
            (pages_needed + SAMD21_PAGES_PER_ROW - 1) / SAMD21_PAGES_PER_ROW);
 
-  // ── SAM-BA handshake ──────────────────────────────────────────────────────
-  if (!this->samba_init_()) {
+  char msg[sizeof(FlashStatusPayload::message)];
+  char ver[64];
+  if (!this->samba_init_(ver, sizeof(ver))) {
     ESP_LOGE(TAG, "SAM-BA init failed");
     return false;
   }
-
-  // ── Verify device responds with expected SAMD21 version string ────────────
-  std::string ver;
-  if (this->samba_version_(ver)) {
-    ESP_LOGI(TAG, "SAM-BA version: %s", ver.c_str());
-    this->fire_flash_status_("flashing", 20, "SAM-BA ready: " + ver);
+  if (this->samba_version_(ver, sizeof(ver))) {
+    ESP_LOGI(TAG, "SAM-BA version: %s", ver);
+    snprintf(msg, sizeof(msg), "SAM-BA ready: %s", ver);
+    this->fire_flash_status_("flashing", 20, msg);
   } else {
     this->fire_flash_status_("flashing", 20, "SAM-BA ready");
   }
 
-  // ── Disable NVM cache and enable manual page write (once for all pages) ───
-  uint32_t ctrlb_orig = 0;
-  if (!this->samba_read_word_(NVM_BASE + NVM_REG_CTRLB, ctrlb_orig)) {
+  // Disable the NVM cache and enable manual page write, once for all pages
+  uint32_t ctrlb = 0;
+  if (!this->samba_read_word_(NVM_BASE + NVM_REG_CTRLB, ctrlb)) {
     ESP_LOGE(TAG, "Failed to read NVM CTRLB");
     return false;
   }
-  if (!this->samba_write_word_(NVM_BASE + NVM_REG_CTRLB, ctrlb_orig | NVM_CTRLB_CACHE_BIT | NVM_CTRLB_MANW_BIT)) {
-    return false;
-  }
+  this->samba_write_word_(NVM_BASE + NVM_REG_CTRLB, ctrlb | NVM_CTRLB_CACHE_BIT | NVM_CTRLB_MANW_BIT);
 
-  // ── Page-by-page write ────────────────────────────────────────────────────
-  // For each page: PBC (clear page buffer), then 16× SAM-BA 'W' 32-bit word
-  // writes to the flash page address.  With MANW=1, the NVM controller holds
-  // these writes in its page buffer without auto-programming; the WP command
-  // then commits the buffer to flash.  (SAMD21 datasheet §22.8.7)
   this->fire_flash_status_("flashing", 25, "Writing flash pages");
   uint8_t page_data[SAMD21_PAGE_SIZE];
-
   for (uint32_t page = 0; page < pages_needed; page++) {
     App.feed_wdt();
 
-    // Erase the row at the start of every 4-page group.
     if (page % SAMD21_PAGES_PER_ROW == 0) {
       uint32_t row_byte_addr = SAMD21_APP_ADDR + page * SAMD21_PAGE_SIZE;
       ESP_LOGD(TAG, "Erasing row %" PRIu32 " (addr 0x%08" PRIX32 ")", page / SAMD21_PAGES_PER_ROW, row_byte_addr);
@@ -571,10 +394,9 @@ bool EmonTxUpdater::do_flash_() {
       }
     }
 
-    // Copy page data; pad the last (possibly partial) page with 0xFF.
-    size_t offset = (size_t) page * SAMD21_PAGE_SIZE;
-    size_t avail = (fw_size > offset) ? (fw_size - offset) : 0u;
-    size_t copy_len = (avail < SAMD21_PAGE_SIZE) ? avail : SAMD21_PAGE_SIZE;
+    // Pad the last, partial page with 0xFF
+    const size_t offset = static_cast<size_t>(page) * SAMD21_PAGE_SIZE;
+    const size_t copy_len = std::min<size_t>(fw_size - offset, SAMD21_PAGE_SIZE);
     esp_err_t err = esp_partition_read(this->staging_partition_, this->staging_offset_ + offset, page_data, copy_len);
     if (err != ESP_OK) {
       ESP_LOGE(TAG, "Failed to read staged firmware at byte %zu: %s", offset, esp_err_to_name(err));
@@ -591,226 +413,83 @@ bool EmonTxUpdater::do_flash_() {
     }
 
     if (page % 64 == 0) {
-      int pct = 25 + static_cast<int>(page * 70u / pages_needed);
-      char msg[32];
       snprintf(msg, sizeof(msg), "Page %" PRIu32 " / %" PRIu32, page, pages_needed);
-      this->fire_flash_status_("flashing", pct, msg);
+      this->fire_flash_status_("flashing", 25 + static_cast<int>(page * 70u / pages_needed), msg);
       ESP_LOGI(TAG, "Progress: %" PRIu32 "/%" PRIu32 " pages", page, pages_needed);
     }
   }
 
   ESP_LOGI(TAG, "All pages written — resetting SAMD21");
   this->fire_flash_status_("flashing", 95, "Resetting device");
-
-  // ── Software reset via ARM AIRCR ──────────────────────────────────────────
-  // writeWord will likely cause a SAM-BA timeout since the device resets
-  // immediately; this is expected.
   this->samba_write_word_(ARM_AIRCR_ADDR, ARM_AIRCR_RESET);
-
   return true;
 }
 
-// ═════════════════════════════════════════════════════════════════════════════
-// SAM-BA protocol layer
-// ═════════════════════════════════════════════════════════════════════════════
-
-bool EmonTxUpdater::samba_init_() {
+bool EmonTxUpdater::samba_init_(char *ver_out, size_t ver_size) {
   this->uart_flush_rx_();
 
-  // RS-232 auto-baud sequence: two 0x80 bytes so the SAM-BA monitor can lock
-  // onto the baud rate, followed by '#' which triggers a "\n\r" response.
-  uint8_t resp;
+  // Auto-baud: two 0x80 bytes let the monitor lock onto the baud rate, then '#' gets "\n\r" back.
+  // The replies are read only to drop them.
+  uint8_t discard[3];
   this->emontx_->write_byte(0x80);
-  this->uart_read_byte_(resp, 200);  // discard echo / response
-
+  this->uart_read_bytes_(discard, 1, 200);
   this->emontx_->write_byte(0x80);
-  this->uart_read_byte_(resp, 200);
-
+  this->uart_read_bytes_(discard, 1, 200);
   this->emontx_->write_byte('#');
-  // SAM-BA responds with "\n\r" (2 bytes); read and discard up to 4 bytes.
-  uint8_t discard[4];
   this->uart_read_bytes_(discard, 3, 300);
 
-  // Switch to non-terminal (binary) mode: "N#" → response "\n\r".
-  const uint8_t n_cmd[] = {'N', '#'};
-  this->uart_write_(n_cmd, sizeof(n_cmd));
+  // Binary mode
+  this->uart_write_("N#", 2);
   this->uart_read_bytes_(discard, 2, 300);
 
-  // Verify via version command.
-  std::string ver;
-  if (!this->samba_version_(ver)) {
+  if (!this->samba_version_(ver_out, ver_size)) {
     ESP_LOGE(TAG, "SAM-BA version query failed — device not in bootloader mode?");
     return false;
   }
-  ESP_LOGD(TAG, "SAM-BA handshake OK, version: %s", ver.c_str());
   return true;
 }
 
-bool EmonTxUpdater::samba_version_(std::string &ver_out) {
-  const uint8_t cmd[] = {'V', '#'};
-  this->uart_write_(cmd, sizeof(cmd));
+bool EmonTxUpdater::samba_version_(char *ver_out, size_t ver_size) {
+  this->uart_write_("V#", 2);
 
-  // Read bytes until a 50 ms gap (end of response).
-  // Non-printable bytes (\n, \r, prompts) are consumed and discarded so they
-  // do not become stale bytes that corrupt subsequent SAM-BA reads.
-  ver_out.clear();
+  // Read until a 50 ms gap. Non-printable bytes are read too, so they can't confuse later replies.
+  size_t len = 0;
   uint8_t b;
-  while (this->uart_read_byte_(b, 50)) {
-    if (b >= 0x20 && b <= 0x7E && ver_out.size() < 200)
-      ver_out += static_cast<char>(b);
-    // Non-printable bytes are intentionally consumed here and not added.
+  while (this->uart_read_bytes_(&b, 1, 50)) {
+    if (b >= 0x20 && b <= 0x7E && len + 1 < ver_size)
+      ver_out[len++] = static_cast<char>(b);
   }
-  return !ver_out.empty();
+  ver_out[len] = '\0';
+  return len > 0;
 }
 
-bool EmonTxUpdater::samba_write_word_(uint32_t addr, uint32_t value) {
-  // "W%08X,%08X#" — 19 chars; no response over UART.
+void EmonTxUpdater::samba_write_word_(uint32_t addr, uint32_t value) {
   char cmd[20];
-  snprintf(cmd, sizeof(cmd), "W%08" PRIX32 ",%08" PRIX32 "#", addr, value);
-  this->uart_write_(reinterpret_cast<const uint8_t *>(cmd), 19);
-  return true;
+  int len = snprintf(cmd, sizeof(cmd), "W%08" PRIX32 ",%08" PRIX32 "#", addr, value);
+  this->uart_write_(cmd, len);
 }
 
 bool EmonTxUpdater::samba_read_word_(uint32_t addr, uint32_t &value_out) {
-  // "w%08X,4#" — 12 chars; response is 4 raw bytes (little-endian uint32).
   char cmd[13];
-  snprintf(cmd, sizeof(cmd), "w%08" PRIX32 ",4#", addr);
-  this->uart_write_(reinterpret_cast<const uint8_t *>(cmd), 12);
+  int len = snprintf(cmd, sizeof(cmd), "w%08" PRIX32 ",4#", addr);
+  this->uart_write_(cmd, len);
 
   uint8_t buf[4];
-  if (!this->uart_read_bytes_(buf, 4, 500)) {
+  if (!this->uart_read_bytes_(buf, sizeof(buf), 500)) {
     ESP_LOGE(TAG, "samba_read_word_ timeout (addr=0x%08" PRIX32 ")", addr);
     return false;
   }
-  value_out = (static_cast<uint32_t>(buf[3]) << 24) | (static_cast<uint32_t>(buf[2]) << 16) |
-              (static_cast<uint32_t>(buf[1]) << 8) | static_cast<uint32_t>(buf[0]);
+  value_out = read_le32(buf);
   return true;
 }
-
-bool EmonTxUpdater::samba_write_(uint32_t addr, const uint8_t *data, size_t size) {
-  // "S%08X,%08X#" — 19 chars, then XModem-CRC transfer.
-  // Flush any stale bytes BEFORE sending the command so they cannot be
-  // mistaken for the 'C' XModem start that SAM-BA sends in response.
-  // SAM-BA cannot have sent 'C' yet — it hasn't received the command.
-  this->uart_flush_rx_();
-  char cmd[20];
-  snprintf(cmd, sizeof(cmd), "S%08" PRIX32 ",%08" PRIX32 "#", addr, (uint32_t) size);
-  this->uart_write_(reinterpret_cast<const uint8_t *>(cmd), 19);
-  return this->xmodem_send_(data, size);
-}
-
-bool EmonTxUpdater::samba_go_(uint32_t addr) {
-  // "G%08X#" — 10 chars; no response expected over UART.
-  char cmd[11];
-  snprintf(cmd, sizeof(cmd), "G%08" PRIX32 "#", addr);
-  this->uart_write_(reinterpret_cast<const uint8_t *>(cmd), 10);
-  return true;
-}
-
-// ═════════════════════════════════════════════════════════════════════════════
-// XModem-CRC sender
-// ═════════════════════════════════════════════════════════════════════════════
-
-uint16_t EmonTxUpdater::crc16_(const uint8_t *data, size_t len) {
-  uint16_t crc = 0;
-  while (len-- > 0)
-    crc = (crc << 8) ^ CRC16_TABLE[((crc >> 8) ^ *data++) & 0xFF];
-  return crc;
-}
-
-bool EmonTxUpdater::xmodem_send_(const uint8_t *data, size_t size) {
-  // Wait for receiver to send 'C' (XModem-CRC mode request).
-  // Use a total-timeout loop instead of a fixed retry count so that any
-  // stale bytes that slipped through the flush cannot exhaust retries before
-  // SAM-BA's real 'C' arrives.  Any unexpected byte is logged and skipped.
-  uint8_t start_byte;
-  bool got_start = false;
-  uint32_t deadline = millis() + 10000;  // 10 s overall timeout
-  while (!got_start && millis() < deadline) {
-    App.feed_wdt();
-    if (!this->uart_read_byte_(start_byte, 200))
-      continue;  // 200 ms chunk timeout — keep trying within the 10 s window
-    if (start_byte == XMODEM_CRC_START) {
-      got_start = true;
-    } else {
-      ESP_LOGW(TAG, "XModem: discarding unexpected byte 0x%02X while waiting for 'C'", start_byte);
-    }
-  }
-  if (!got_start) {
-    ESP_LOGE(TAG, "XModem: no CRC start ('C') received from SAM-BA (10 s timeout)");
-    return false;
-  }
-
-  uint8_t frame[XMODEM_FRAME_SZ];
-  uint8_t blk_num = 1;
-  size_t sent = 0;
-
-  while (sent < size || (sent == 0 && size == 0)) {
-    // Build the 128-byte payload: real data + zero padding.
-    size_t chunk = (size - sent > XMODEM_BLK_SIZE) ? XMODEM_BLK_SIZE : (size - sent);
-    frame[0] = XMODEM_SOH;
-    frame[1] = blk_num;
-    frame[2] = static_cast<uint8_t>(~blk_num);
-    memcpy(&frame[3], data + sent, chunk);
-    if (chunk < XMODEM_BLK_SIZE)
-      memset(&frame[3] + chunk, 0x00, XMODEM_BLK_SIZE - chunk);
-
-    uint16_t crc = crc16_(&frame[3], XMODEM_BLK_SIZE);
-    frame[3 + XMODEM_BLK_SIZE] = static_cast<uint8_t>(crc >> 8);
-    frame[3 + XMODEM_BLK_SIZE + 1] = static_cast<uint8_t>(crc & 0xFF);
-
-    // Transmit block with retries.
-    bool block_ok = false;
-    for (int retry = 0; retry < XMODEM_MAX_RETRIES; retry++) {
-      this->uart_write_(frame, XMODEM_FRAME_SZ);
-      uint8_t ack;
-      if (this->uart_read_byte_(ack, 2000)) {
-        if (ack == XMODEM_ACK) {
-          block_ok = true;
-          break;
-        } else if (ack == XMODEM_NAK) {
-          ESP_LOGW(TAG, "XModem: NAK on block %u, retrying", blk_num);
-        }
-      } else {
-        ESP_LOGW(TAG, "XModem: timeout waiting for ACK on block %u", blk_num);
-      }
-    }
-    if (!block_ok) {
-      ESP_LOGE(TAG, "XModem: block %u failed after %d retries", blk_num, XMODEM_MAX_RETRIES);
-      return false;
-    }
-
-    sent += chunk;
-    blk_num++;
-
-    // If we've sent all the data and the last chunk was exactly XMODEM_BLK_SIZE,
-    // we're done — exit the loop.
-    if (chunk == XMODEM_BLK_SIZE && sent >= size)
-      break;
-  }
-
-  // EOT handshake.
-  for (int retry = 0; retry < XMODEM_MAX_RETRIES; retry++) {
-    this->emontx_->write_byte(XMODEM_EOT);
-    uint8_t ack;
-    if (this->uart_read_byte_(ack, 2000) && ack == XMODEM_ACK)
-      return true;
-  }
-  ESP_LOGE(TAG, "XModem: EOT not acknowledged");
-  return false;
-}
-
-// ═════════════════════════════════════════════════════════════════════════════
-// D2x NVM flash layer
-// ═════════════════════════════════════════════════════════════════════════════
 
 bool EmonTxUpdater::nvm_wait_ready_(uint32_t timeout_ms) {
-  uint32_t deadline = millis() + timeout_ms;
-  while (millis() < deadline) {
+  const uint32_t start = millis();
+  while (millis() - start < timeout_ms) {
     uint32_t intflag = 0;
     if (!this->samba_read_word_(NVM_BASE + NVM_REG_INTFLAG, intflag))
       return false;
-    if (intflag & 0x1u)  // READY bit
+    if (intflag & NVM_INTFLAG_READY)
       return true;
     App.feed_wdt();
   }
@@ -821,19 +500,16 @@ bool EmonTxUpdater::nvm_wait_ready_(uint32_t timeout_ms) {
 bool EmonTxUpdater::nvm_command_(uint8_t cmd) {
   if (!this->nvm_wait_ready_())
     return false;
-  if (!this->samba_write_word_(NVM_BASE + NVM_REG_CTRLA, static_cast<uint32_t>(NVM_CMDEX_KEY | cmd)))
-    return false;
+  this->samba_write_word_(NVM_BASE + NVM_REG_CTRLA, NVM_CMDEX_KEY | cmd);
   if (!this->nvm_wait_ready_())
     return false;
 
-  // Check for errors in INTFLAG bit 1.
   uint32_t intflag = 0;
   if (!this->samba_read_word_(NVM_BASE + NVM_REG_INTFLAG, intflag))
     return false;
-  if (intflag & 0x2u) {
+  if (intflag & NVM_INTFLAG_ERROR) {
     ESP_LOGE(TAG, "NVM command 0x%02X produced an error (INTFLAG=0x%08" PRIX32 ")", cmd, intflag);
-    // Clear the error bit.
-    this->samba_write_word_(NVM_BASE + NVM_REG_INTFLAG, 0x2u);
+    this->samba_write_word_(NVM_BASE + NVM_REG_INTFLAG, NVM_INTFLAG_ERROR);
     return false;
   }
   return true;
@@ -842,63 +518,42 @@ bool EmonTxUpdater::nvm_command_(uint8_t cmd) {
 bool EmonTxUpdater::nvm_erase_row_(uint32_t row_byte_addr) {
   if (!this->nvm_wait_ready_())
     return false;
-
-  // Clear PROGE/LOCKE/NVME error bits in STATUS (W1C: writing 1 clears).
-  // We don't read-modify-write — just assert all three clear bits (reserved bits are write-ignored).
   this->samba_write_word_(NVM_BASE + NVM_REG_STATUS, NVM_STATUS_ERR_MASK);
-
-  // Write the word address (byte_addr / 2) to ADDR, then issue ERASE ROW.
-  if (!this->samba_write_word_(NVM_BASE + NVM_REG_ADDR, row_byte_addr / 2u))
-    return false;
-  bool ok = this->nvm_command_(NVM_CMD_ER);
-  if (!ok)
+  // ADDR takes a 16-bit word address
+  this->samba_write_word_(NVM_BASE + NVM_REG_ADDR, row_byte_addr / 2u);
+  if (!this->nvm_command_(NVM_CMD_ER)) {
     ESP_LOGE(TAG, "nvm_erase_row_ failed at 0x%08" PRIX32, row_byte_addr);
-  return ok;
+    return false;
+  }
+  return true;
 }
 
 bool EmonTxUpdater::nvm_write_page_(uint32_t page_idx, const uint8_t *data) {
   const uint32_t page_byte_addr = SAMD21_APP_ADDR + page_idx * SAMD21_PAGE_SIZE;
 
-  // 1. Clear the NVM page buffer.
   if (!this->nvm_command_(NVM_CMD_PBC)) {
     ESP_LOGE(TAG, "nvm_write_page_ PBC failed at page %" PRIu32, page_idx);
     return false;
   }
 
-  // 2. Fill the NVM page buffer using 16 SAM-BA 'W' 32-bit word writes.
-  //    With MANW=1 the NVM controller captures writes into its page buffer
-  //    without auto-programming.  (SAMD21 datasheet §22.8.7)
+  // With MANW=1 these writes only fill the page buffer; WP below programs it (datasheet §22.8.7)
   ESP_LOGV(TAG, "  page %" PRIu32 " addr=0x%08" PRIX32 ": filling page buffer", page_idx, page_byte_addr);
-  for (size_t i = 0; i < SAMD21_PAGE_SIZE; i += 4) {
-    const uint32_t word = static_cast<uint32_t>(data[i]) | (static_cast<uint32_t>(data[i + 1]) << 8) |
-                          (static_cast<uint32_t>(data[i + 2]) << 16) | (static_cast<uint32_t>(data[i + 3]) << 24);
-    if (!this->samba_write_word_(page_byte_addr + i, word)) {
-      ESP_LOGE(TAG, "nvm_write_page_ W word %zu failed at page %" PRIu32, i / 4, page_idx);
-      return false;
-    }
-  }
+  for (size_t i = 0; i < SAMD21_PAGE_SIZE; i += 4)
+    this->samba_write_word_(page_byte_addr + i, read_le32(data + i));
 
-  // 3. Wait for NVM ready, set ADDR explicitly, issue Write Page.
-  //    (ADDR is also updated automatically by the last W write above, but
-  //     setting it explicitly matches BOSSA's behaviour and avoids ambiguity.)
   if (!this->nvm_wait_ready_()) {
     ESP_LOGE(TAG, "nvm_write_page_ wait-ready (pre-WP) timeout at page %" PRIu32, page_idx);
     return false;
   }
-  if (!this->samba_write_word_(NVM_BASE + NVM_REG_ADDR, page_byte_addr / 2u))
-    return false;
-  bool ok = this->nvm_command_(NVM_CMD_WP);
-  if (!ok)
+  // The last word write already set ADDR; set it again as BOSSA does
+  this->samba_write_word_(NVM_BASE + NVM_REG_ADDR, page_byte_addr / 2u);
+  if (!this->nvm_command_(NVM_CMD_WP)) {
     ESP_LOGE(TAG, "nvm_write_page_ WP failed at page %" PRIu32 " (addr 0x%08" PRIX32 ")", page_idx, page_byte_addr);
-  else {
-    ESP_LOGV(TAG, "  page %" PRIu32 " written OK", page_idx);
+    return false;
   }
-  return ok;
+  ESP_LOGV(TAG, "  page %" PRIu32 " written OK", page_idx);
+  return true;
 }
-
-// ═════════════════════════════════════════════════════════════════════════════
-// UART helpers
-// ═════════════════════════════════════════════════════════════════════════════
 
 void EmonTxUpdater::uart_flush_rx_() {
   uint8_t b;
@@ -906,32 +561,21 @@ void EmonTxUpdater::uart_flush_rx_() {
     this->emontx_->read_byte(&b);
 }
 
-void EmonTxUpdater::uart_write_(const uint8_t *data, size_t len) { this->emontx_->write_array(data, len); }
-
-bool EmonTxUpdater::uart_read_byte_(uint8_t &byte, uint32_t timeout_ms) {
-  uint32_t deadline = millis() + timeout_ms;
-  uint32_t wdt_tick = millis();
-  while (millis() < deadline) {
-    if (this->emontx_->available() > 0 && this->emontx_->read_byte(&byte))
-      return true;
-    delay(1);
-    if (millis() - wdt_tick >= 100) {
-      App.feed_wdt();
-      wdt_tick = millis();
-    }
-  }
-  return false;
+void EmonTxUpdater::uart_write_(const char *data, size_t len) {
+  this->emontx_->write_array(reinterpret_cast<const uint8_t *>(data), len);
 }
 
+// Runs on the flash task only, so it can block
 bool EmonTxUpdater::uart_read_bytes_(uint8_t *buf, size_t len, uint32_t timeout_ms) {
-  uint32_t deadline = millis() + timeout_ms;
-  uint32_t wdt_tick = millis();
+  const uint32_t start = millis();
+  uint32_t wdt_tick = start;
   size_t read = 0;
-  while (read < len && millis() < deadline) {
-    if (this->emontx_->available() > 0 && this->emontx_->read_byte(&buf[read]))
+  while (read < len && millis() - start < timeout_ms) {
+    if (this->emontx_->available() > 0 && this->emontx_->read_byte(&buf[read])) {
       read++;
-    else
-      delay(1);
+    } else {
+      delay(1);  // NOLINT
+    }
     if (millis() - wdt_tick >= 100) {
       App.feed_wdt();
       wdt_tick = millis();
@@ -940,22 +584,14 @@ bool EmonTxUpdater::uart_read_bytes_(uint8_t *buf, size_t len, uint32_t timeout_
   return read == len;
 }
 
-// ═════════════════════════════════════════════════════════════════════════════
-// HA status event helper
-// ═════════════════════════════════════════════════════════════════════════════
-
-// Thread-safe: may be called from either the main loop or the flash task.
-// Posts to status_queue_; loop() drains the queue and calls fire_homeassistant_event
-// on the main-loop thread where ESPHome API calls are safe.
-void EmonTxUpdater::fire_flash_status_(const std::string &status, int progress, const std::string &message) {
+void EmonTxUpdater::fire_flash_status_(const char *status, int progress, const char *message) {
   if (this->status_queue_ == nullptr)
     return;
-  FlashStatusPayload payload = {};
-  strncpy(payload.status, status.c_str(), sizeof(payload.status) - 1);
-  strncpy(payload.message, message.c_str(), sizeof(payload.message) - 1);
-  payload.progress = progress;
-  // Non-blocking send; drop the event if the queue is full rather than deadlocking.
-  xQueueSend(this->status_queue_, &payload, 0);
+  FlashStatusPayload payload{status, progress, {}};
+  strncpy(payload.message, message, sizeof(payload.message) - 1);
+  // Drop the event rather than block when the queue is full
+  if (xQueueSend(this->status_queue_, &payload, 0) == pdTRUE)
+    this->enable_loop_soon_any_context();
 }
 
 }  // namespace esphome::emontx_updater

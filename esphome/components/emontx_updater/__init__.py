@@ -1,24 +1,23 @@
 import esphome.codegen as cg
 from esphome.components import emontx
+from esphome.components.api import CONF_CUSTOM_SERVICES, CONF_HOMEASSISTANT_SERVICES
+from esphome.components.const import CONF_VERIFY_SSL
+from esphome.components.emontx import CONF_EMONTX_ID
+from esphome.components.http_request import CONF_HTTP_REQUEST_ID, HttpRequestComponent
 import esphome.config_validation as cv
 from esphome.const import CONF_ID
 import esphome.final_validate as fv
 from esphome.types import ConfigType
 
-DEPENDENCIES = ["esp32", "emontx", "http_request", "api"]
 CODEOWNERS = ["@FredM67"]
+DEPENDENCIES = ["esp32", "emontx", "http_request", "api"]
+DOMAIN = "emontx_updater"
 
 emontx_updater_ns = cg.esphome_ns.namespace("emontx_updater")
 EmonTxUpdater = emontx_updater_ns.class_("EmonTxUpdater", cg.Component)
 
-http_request_ns = cg.esphome_ns.namespace("http_request")
-HttpRequestComponent = http_request_ns.class_("HttpRequestComponent")
-
-CONF_EMONTX_ID = "emontx_id"
-CONF_HTTP_REQUEST_ID = "http_request_id"
 CONF_BOOTLOADER_TIMEOUT = "bootloader_timeout"
 CONF_DRY_RUN = "dry_run"
-CONF_VERIFY_SSL = "verify_ssl"
 
 CONFIG_SCHEMA = cv.Schema(
     {
@@ -35,20 +34,17 @@ CONFIG_SCHEMA = cv.Schema(
 
 
 def final_validate(config: ConfigType) -> ConfigType:
-    full_config = fv.full_config.get()
-
-    api_config = full_config.get("api", {})
-    if not api_config.get("custom_services", False):
+    api_config = fv.full_config.get().get("api", {})
+    if not api_config.get(CONF_CUSTOM_SERVICES, False):
         raise cv.Invalid(
             "emontx_updater requires 'custom_services: true' in the 'api:' section "
             "(needed to register the flash_emontx6 service in Home Assistant)."
         )
-    if not api_config.get("homeassistant_services", False):
+    if not api_config.get(CONF_HOMEASSISTANT_SERVICES, False):
         raise cv.Invalid(
             "emontx_updater requires 'homeassistant_services: true' in the 'api:' section "
             "(needed to send flash status events to Home Assistant)."
         )
-
     return config
 
 
@@ -56,15 +52,9 @@ FINAL_VALIDATE_SCHEMA = final_validate
 
 
 async def to_code(config: ConfigType) -> None:
-    var = cg.new_Pvariable(config[CONF_ID])
-    await cg.register_component(var, config)
-
     hub = await cg.get_variable(config[CONF_EMONTX_ID])
-    cg.add(var.set_emontx(hub))
-
-    http_request = await cg.get_variable(config[CONF_HTTP_REQUEST_ID])
-    cg.add(var.set_http_request(http_request))
-
+    var = cg.new_Pvariable(config[CONF_ID], hub)
+    await cg.register_component(var, config)
     cg.add(var.set_bootloader_timeout(config[CONF_BOOTLOADER_TIMEOUT]))
     cg.add(var.set_dry_run(config[CONF_DRY_RUN]))
     cg.add(var.set_verify_ssl(config[CONF_VERIFY_SSL]))
