@@ -1,8 +1,8 @@
 import esphome.codegen as cg
 from esphome.components import emontx, esp32
 from esphome.components.api import CONF_CUSTOM_SERVICES, CONF_HOMEASSISTANT_SERVICES
-from esphome.components.const import CONF_VERIFY_SSL
 from esphome.components.emontx import CONF_EMONTX_ID
+from esphome.components.http_request import CONF_VERIFY_SSL
 import esphome.config_validation as cv
 from esphome.const import CONF_ID
 import esphome.final_validate as fv
